@@ -1,25 +1,32 @@
 name: Executar Automação NFes
+
 on:
   repository_dispatch:
     types: [atualizar-emissoes]
   workflow_dispatch:
+
 jobs:
   run-bot:
     runs-on: ubuntu-latest
     steps:
       - name: Baixando arquivos
         uses: actions/checkout@v4
+
       - name: Configurando o Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
       - name: Instalando Dependências
         run: |
           python -m pip install --upgrade pip
           pip install playwright google-api-python-client google-auth-httplib2 google-auth-oauthlib python-dotenv pandas gspread
+          playwright install --with-deps chromium
+
       - name: Criando o arquivo do Google Sheets
         run: |
           echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > google_credentials.json
+
       - name: Executando a Automação
         env:
           CONTA_AZUL_EMAIL: ${{ secrets.CONTA_AZUL_EMAIL }}
