@@ -140,18 +140,30 @@ async def processar_cliente(context, page, cliente_info, sheet):
                 # O menu abriu, agora clica em "Este mês"
                 btn_este_mes = page_pro.locator('text="Este mês"').nth(0)
                 if await btn_este_mes.count() > 0 and await btn_este_mes.is_visible():
-                    await btn_este_mes.click(force=True)
+                    await btn_este_mes.click() # Sem force=True para respeitar animações
                     print("Filtro alterado para 'Este mês' com sucesso via Playwright!")
-                    await page_pro.wait_for_load_state("networkidle")
-                    await asyncio.sleep(4)
                 else:
-                    # Tenta clicar com a primeira letra maiúscula/minúscula caso seja diferente
                     btn_este_mes_alt = page_pro.locator('text="Este Mês"').nth(0)
                     if await btn_este_mes_alt.count() > 0 and await btn_este_mes_alt.is_visible():
-                        await btn_este_mes_alt.click(force=True)
+                        await btn_este_mes_alt.click()
                         print("Filtro alterado para 'Este Mês' com sucesso!")
+                
+                await page_pro.wait_for_load_state("networkidle")
+                await asyncio.sleep(2)
+                
+                # Forçar o refresh clicando na Lupa de pesquisa
+                try:
+                    lupa = page_pro.locator('button:has(svg), button[type="submit"]').filter(has_text="").nth(1)
+                    # Melhor: localizar o botão ao lado do input de pesquisa
+                    lupa2 = page_pro.locator('input[placeholder*="Pesquisar"]').locator('xpath=..').locator('button').first
+                    if await lupa2.count() > 0 and await lupa2.is_visible():
+                        await lupa2.click()
+                        print("Clicou na lupa para forçar a busca.")
                         await page_pro.wait_for_load_state("networkidle")
-                        await asyncio.sleep(4)
+                        await asyncio.sleep(3)
+                except Exception as e:
+                    print(f"Não achou a lupa, mas o filtro já deve ter aplicado: {e}")
+                    
         except Exception as e:
             print(f"Não conseguiu alterar o filtro de data: {e}")
             
@@ -276,7 +288,9 @@ async def main():
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(
             accept_downloads=True,
-            viewport={'width': 1041, 'height': 947}
+            viewport={'width': 1041, 'height': 947},
+            locale='pt-BR',
+            timezone_id='America/Sao_Paulo'
         )
         page = await context.new_page()
         
