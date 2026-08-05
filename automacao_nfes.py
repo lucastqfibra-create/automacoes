@@ -108,11 +108,58 @@ async def processar_cliente(context, page, cliente_info, sheet):
             vazio = False
             
         if vazio:
-            print("Nenhuma nota fiscal encontrada no período. O total será 0.")
+            print("Nenhuma nota fiscal encontrada no período inicial.")
+        
+        # --- NOVO: Forçar o filtro "Este mês" ---
+        print("Tentando configurar filtro para 'Este mês'...")
+        try:
+            clicou_filtro = await page_pro.evaluate('''() => {
+                const labels = Array.from(document.querySelectorAll('label, div, span'));
+                const periodLabel = labels.find(el => el.innerText && el.innerText.trim() === 'Período');
+                if (periodLabel) {
+                    const parent = periodLabel.parentElement;
+                    if (parent) {
+                        const btns = parent.querySelectorAll('button');
+                        if (btns.length >= 2) {
+                            btns[1].click();
+                            return true;
+                        }
+                    }
+                }
+                const today = new Date();
+                const year = today.getFullYear().toString();
+                const allBtns = Array.from(document.querySelectorAll('button'));
+                for (let b of allBtns) {
+                    if (b.innerText && (b.innerText.includes(year) || b.innerText.includes("Últimos 30") || b.innerText.includes("Este mês"))) {
+                        b.click();
+                        return true;
+                    }
+                }
+                return false;
+            }''')
+            
+            if clicou_filtro:
+                await asyncio.sleep(1)
+                btn_este_mes = page_pro.locator('button:has-text("Este mês"), li:has-text("Este mês"), span:has-text("Este mês")').first
+                if await btn_este_mes.count() > 0 and await btn_este_mes.is_visible():
+                    await btn_este_mes.click(force=True)
+                    print("Filtro alterado para 'Este mês' com sucesso!")
+                    await page_pro.wait_for_load_state("networkidle")
+                    await asyncio.sleep(4)
+        except Exception as e:
+            print(f"Não conseguiu alterar o filtro de data: {e}")
+            
+        # Re-verifica se ficou vazio após o filtro
+        try:
+            await page_pro.wait_for_selector('text="Nenhum resultado encontrado"', timeout=5000)
+            vazio = True
+        except:
+            vazio = False
+
+        if vazio:
+            print("Nenhuma nota fiscal encontrada no mês atual. O total será 0.")
         else:
             print("Abrindo menu de exportação (busca robusta)...")
-            await page_pro.keyboard.press("Escape")
-            await asyncio.sleep(1)
             
             export_clicked = False
             for selector in [
