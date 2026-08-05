@@ -110,42 +110,48 @@ async def processar_cliente(context, page, cliente_info, sheet):
         if vazio:
             print("Nenhuma nota fiscal encontrada no período inicial.")
         
-        # --- NOVO: Forçar o filtro "Este mês" ---
+        # --- NOVO: Forçar o filtro "Este mês" (Puro Playwright) ---
         print("Tentando configurar filtro para 'Este mês'...")
         try:
-            clicou_filtro = await page_pro.evaluate('''() => {
-                const labels = Array.from(document.querySelectorAll('label, div, span'));
-                const periodLabel = labels.find(el => el.innerText && el.innerText.trim() === 'Período');
-                if (periodLabel) {
-                    const parent = periodLabel.parentElement;
-                    if (parent) {
-                        const btns = parent.querySelectorAll('button');
-                        if (btns.length >= 2) {
-                            btns[1].click();
-                            return true;
-                        }
-                    }
-                }
-                const today = new Date();
-                const year = today.getFullYear().toString();
-                const allBtns = Array.from(document.querySelectorAll('button'));
-                for (let b of allBtns) {
-                    if (b.innerText && (b.innerText.includes(year) || b.innerText.includes("Últimos 30") || b.innerText.includes("Este mês"))) {
-                        b.click();
-                        return true;
-                    }
-                }
-                return false;
-            }''')
+            import datetime
+            meses = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
+            hoje = datetime.datetime.now()
+            mes_atual_str = f"{meses[hoje.month - 1]} de {hoje.year}"
             
-            if clicou_filtro:
-                await asyncio.sleep(1)
-                btn_este_mes = page_pro.locator('button:has-text("Este mês"), li:has-text("Este mês"), span:has-text("Este mês")').first
+            clicou_dropdown = False
+            
+            # Tenta encontrar o botão pelo texto (ex: "Agosto de 2026" ou "Últimos 30 dias")
+            for texto in [mes_atual_str, "Últimos 30 dias", "Mês passado", "Hoje", "Este ano", "Últimos 7 dias"]:
+                btn = page_pro.locator(f'button:has-text("{texto}")').first
+                if await btn.count() > 0 and await btn.is_visible():
+                    await btn.click(force=True)
+                    clicou_dropdown = True
+                    break
+                    
+            if not clicou_dropdown:
+                # Estratégia B: Clicar abaixo de "Período"
+                lbl_periodo = page_pro.locator('text="Período"').first
+                if await lbl_periodo.count() > 0:
+                    # Encontrar todos os botões na tela e clicar no 2º após o label (geralmente é <, [Mês], >)
+                    pass # O loop acima costuma ser o suficiente
+            
+            if clicou_dropdown:
+                await asyncio.sleep(1.5)
+                # O menu abriu, agora clica em "Este mês"
+                btn_este_mes = page_pro.locator('text="Este mês"').nth(0)
                 if await btn_este_mes.count() > 0 and await btn_este_mes.is_visible():
                     await btn_este_mes.click(force=True)
-                    print("Filtro alterado para 'Este mês' com sucesso!")
+                    print("Filtro alterado para 'Este mês' com sucesso via Playwright!")
                     await page_pro.wait_for_load_state("networkidle")
                     await asyncio.sleep(4)
+                else:
+                    # Tenta clicar com a primeira letra maiúscula/minúscula caso seja diferente
+                    btn_este_mes_alt = page_pro.locator('text="Este Mês"').nth(0)
+                    if await btn_este_mes_alt.count() > 0 and await btn_este_mes_alt.is_visible():
+                        await btn_este_mes_alt.click(force=True)
+                        print("Filtro alterado para 'Este Mês' com sucesso!")
+                        await page_pro.wait_for_load_state("networkidle")
+                        await asyncio.sleep(4)
         except Exception as e:
             print(f"Não conseguiu alterar o filtro de data: {e}")
             
