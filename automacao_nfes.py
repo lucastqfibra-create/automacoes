@@ -219,21 +219,38 @@ async def processar_cliente(context, page, cliente_info, sheet):
         except UnicodeDecodeError:
             df = pd.read_csv(download_path, sep=';', encoding='latin1')
             
-        df_filtrado = df[df['CFOP'].str.contains('5101', na=False)]
+        # Definir CFOPs aceitos por cliente
+        if "Fibrart" in nome_cliente:
+            cfops_validos = ['5101', '6101']
+        elif "Afonso" in nome_cliente:
+            cfops_validos = ['5102', '6102']
+        else:
+            cfops_validos = ['5101']
+            
+        padrao_regex = '|'.join(cfops_validos)
+        df_filtrado = df[df['CFOP'].str.contains(padrao_regex, na=False)]
         df_unique_nfe = df_filtrado.drop_duplicates(subset=['Número da NFe'])
         
         def parse_money(valor_str):
             if pd.isna(valor_str):
                 return 0.0
             valor = str(valor_str).replace('R$', '').replace('.', '').replace(',', '.').strip()
-            return float(valor)
-            
-        df_unique_nfe['Total NF-e Num'] = df_unique_nfe['Total NF-e'].apply(parse_money)
-        total_cfop_5101 = df_unique_nfe['Total NF-e Num'].sum()
+            try:
+                return float(valor)
+            except ValueError:
+                return 0.0
+                
+        if df_unique_nfe.empty:
+            total_cfop_5101 = 0.0
+        else:
+            df_unique_nfe['Total NF-e Num'] = df_unique_nfe['Total NF-e'].apply(parse_money)
+            total_cfop_5101 = df_unique_nfe['Total NF-e Num'].sum()
+            if isinstance(total_cfop_5101, str):
+                total_cfop_5101 = 0.0
     else:
         total_cfop_5101 = 0.0
     
-    total_formatado = f"{total_cfop_5101:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
+    total_formatado = f"{float(total_cfop_5101):,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
     print(f"Total Calculado para {nome_cliente}: R$ {total_formatado}")
     
     print(f"Atualizando Google Sheets (Célula {celula_alvo})...")
