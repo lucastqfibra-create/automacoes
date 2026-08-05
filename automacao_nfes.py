@@ -203,7 +203,7 @@ async def main():
     sheet = client.open_by_key(SPREADSHEET_ID).sheet1
     
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False)
+        browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(
             accept_downloads=True,
             viewport={'width': 1041, 'height': 947}
