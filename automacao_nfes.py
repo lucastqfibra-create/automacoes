@@ -139,8 +139,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
                 # Estratégia B: Clicar abaixo de "Período"
                 lbl_periodo = page_pro.locator('text="Período"').first
                 if await lbl_periodo.count() > 0:
-                    # Encontrar todos os botões na tela e clicar no 2º após o label (geralmente é <, [Mês], >)
-                    pass # O loop acima costuma ser o suficiente
+                    pass
             
             if clicou_dropdown:
                 await asyncio.sleep(1.5)
@@ -188,7 +187,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
             
             export_clicked = False
             for selector in [
-                'div[title="Ações"] .ds-split-button-wrapper-group__trigger button', # O botão da setinha ao lado de Ações
+                'div[title="Ações"] .ds-split-button-wrapper-group__trigger button',
                 'button:has-text("Exportar")',
                 '[aria-label="Exportar"]',
                 '[aria-label="Opções de exportação"]'
@@ -198,7 +197,6 @@ async def processar_cliente(context, page, cliente_info, sheet):
                     if await btn.count() > 0 and await btn.is_visible():
                         await btn.click(force=True)
                         await asyncio.sleep(2)
-                        # Tenta procurar a opção Exportar planilha no menu que se abriu
                         exportar_opt = page_pro.locator('text="Exportar planilha"').first
                         if await exportar_opt.count() > 0 and await exportar_opt.is_visible():
                             export_clicked = True
@@ -211,7 +209,6 @@ async def processar_cliente(context, page, cliente_info, sheet):
             
             print("Clicando em Exportar planilha...")
             async with page_pro.expect_download() as download_info:
-                # Se não achar Exportar Planilha aqui, dará TimeoutError
                 btn_export = page_pro.locator('text="Exportar planilha"').first
                 await btn_export.evaluate("el => el.click()")
             download = await download_info.value
@@ -356,7 +353,6 @@ async def main():
             print("Aviso: CONTA_AZUL_TOTP_SECRET não configurado. Se pedir 2FA, vai falhar.")
         # ------------------------------------
 
-        
         # Processar cada cliente da lista
         for cliente in CLIENTES_ALVO:
             await processar_cliente(context, page, cliente, sheet)
