@@ -80,7 +80,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
     except Exception as e:
         print(f"Erro ao selecionar cliente {nome_cliente}: {e}")
         try:
-            screenshot_path = f"C:\\Users\\lucas\\.gemini\\antigravity\\brain\\71932980-6b85-4838-96f3-898801f9af85\\erro_{nome_cliente.replace(' ', '_')}.png"
+            screenshot_path = f"erro_{nome_cliente.replace(' ', '_')}.png"
             await page.screenshot(path=screenshot_path)
             print(f"Screenshot de erro salvo em: {screenshot_path}")
         except:
@@ -221,7 +221,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
     except Exception as e:
         print(f"Erro durante a navegação na Conta Azul ({nome_cliente}): {e}")
         try:
-            screenshot_path = f"C:\\Users\\lucas\\.gemini\\antigravity\\brain\\71932980-6b85-4838-96f3-898801f9af85\\erro_{nome_cliente.replace(' ', '_')}.png"
+            screenshot_path = f"erro_{nome_cliente.replace(' ', '_')}.png"
             await page_pro.screenshot(path=screenshot_path)
             print(f"Screenshot de erro salvo em: {screenshot_path}")
         except:
@@ -314,32 +314,44 @@ async def main():
         if CONTA_AZUL_TOTP_SECRET:
             try:
                 print("Verificando se o 2FA foi solicitado...")
-                # Procura por campos de input típicos de 2FA
-                # O Conta Azul costuma focar no primeiro input do código de 6 dígitos
-                input_2fa = page.locator('input[autocomplete="one-time-code"], input[type="text"], input[type="number"], input[name="code"]').first
+                # Aguarda 5 segundos para o 2FA
+                try:
+                    await page.wait_for_selector('text="código", text="Código", input[autocomplete="one-time-code"]', timeout=5000)
+                except:
+                    pass
+
+                # Pegar o primeiro input text que está VISÍVEL
+                input_2fa_locator = page.locator('input[type="text"], input[type="number"], input[name="code"]').filter(is_visible=True).first
                 
-                # Aguarda até 5 segundos para ver se o input do 2FA aparece
-                if await input_2fa.count() > 0 or await page.locator('text="código", text="Código"').count() > 0:
+                if await input_2fa_locator.count() > 0:
                     print("Tela de 2FA detectada. Gerando código...")
                     import pyotp
                     totp = pyotp.TOTP(CONTA_AZUL_TOTP_SECRET.strip())
                     codigo_2fa = totp.now()
                     print(f"Código gerado: {codigo_2fa}")
                     
-                    # Preenche o código. O comando type simula a digitação real (útil para inputs divididos em 6 quadradinhos)
-                    await input_2fa.type(codigo_2fa, delay=100)
+                    # Preenche o código com fill para garantir o binding do React
+                    await input_2fa_locator.fill(codigo_2fa)
                     await asyncio.sleep(1)
                     
-                    # Clica no botão de prosseguir
-                    btn_auth = page.locator('button:has-text("Autenticar"), button:has-text("Confirmar"), button:has-text("Verificar"), button:has-text("Entrar")').filter(has_text=True).first
-                    if await btn_auth.count() > 0 and await btn_auth.is_visible():
+                    btn_auth = page.locator('button:has-text("Autenticar"), button:has-text("Confirmar"), button:has-text("Verificar")').filter(is_visible=True).first
+                    if await btn_auth.count() > 0:
                         await btn_auth.click()
                     
                     await page.wait_for_load_state("networkidle")
                     await asyncio.sleep(3)
+                    
+                    # Checar se ainda estamos no login/2FA (Se tiver uma mensagem de erro ou o botão ainda estiver lá)
+                    if "login" in page.url or await btn_auth.is_visible():
+                        print("ALERTA: Parece que o 2FA não passou! Tirando screenshot...")
+                        await page.screenshot(path="erro_2fa_falhou.png", full_page=True)
+                        raise Exception("2FA preenchido, mas não autenticou. Código inválido ou erro no clique.")
+                    
                     print("2FA preenchido com sucesso!")
+            except ImportError:
+                print("ERRO FATAL: Biblioteca pyotp não instalada!")
             except Exception as e:
-                print(f"Não foi possível preencher o 2FA (talvez não tenha pedido): {e}")
+                print(f"Erro no fluxo do 2FA: {e}")
         else:
             print("Aviso: CONTA_AZUL_TOTP_SECRET não configurado. Se pedir 2FA, vai falhar.")
         # ------------------------------------
