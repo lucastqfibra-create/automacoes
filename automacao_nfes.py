@@ -13,6 +13,7 @@ CONTA_AZUL_EMAIL = os.getenv('CONTA_AZUL_EMAIL')
 CONTA_AZUL_PASSWORD = os.getenv('CONTA_AZUL_PASSWORD')
 GOOGLE_CRED_FILE = os.getenv('GOOGLE_SHEETS_CREDENTIALS_FILE')
 SPREADSHEET_ID = os.getenv('GOOGLE_SPREADSHEET_ID')
+CONTA_AZUL_TOTP_SECRET = os.getenv('CONTA_AZUL_TOTP_SECRET')
 
 CLIENTES_ALVO = [
     {"nome": "Fibrart", "celula": "Q11"},
@@ -78,6 +79,12 @@ async def processar_cliente(context, page, cliente_info, sheet):
         
     except Exception as e:
         print(f"Erro ao selecionar cliente {nome_cliente}: {e}")
+        try:
+            screenshot_path = f"C:\\Users\\lucas\\.gemini\\antigravity\\brain\\71932980-6b85-4838-96f3-898801f9af85\\erro_{nome_cliente.replace(' ', '_')}.png"
+            await page.screenshot(path=screenshot_path)
+            print(f"Screenshot de erro salvo em: {screenshot_path}")
+        except:
+            pass
         return
     
     download_path = None
@@ -301,6 +308,42 @@ async def main():
         await page.fill('input[type="password"]', CONTA_AZUL_PASSWORD)
         await page.click('text="Entrar"')
         await page.wait_for_load_state("networkidle")
+        await asyncio.sleep(2)
+        
+        # --- NOVO: Lógica de 2FA com PyOTP ---
+        if CONTA_AZUL_TOTP_SECRET:
+            try:
+                print("Verificando se o 2FA foi solicitado...")
+                # Procura por campos de input típicos de 2FA
+                # O Conta Azul costuma focar no primeiro input do código de 6 dígitos
+                input_2fa = page.locator('input[autocomplete="one-time-code"], input[type="text"], input[type="number"], input[name="code"]').first
+                
+                # Aguarda até 5 segundos para ver se o input do 2FA aparece
+                if await input_2fa.count() > 0 or await page.locator('text="código", text="Código"').count() > 0:
+                    print("Tela de 2FA detectada. Gerando código...")
+                    import pyotp
+                    totp = pyotp.TOTP(CONTA_AZUL_TOTP_SECRET.strip())
+                    codigo_2fa = totp.now()
+                    print(f"Código gerado: {codigo_2fa}")
+                    
+                    # Preenche o código. O comando type simula a digitação real (útil para inputs divididos em 6 quadradinhos)
+                    await input_2fa.type(codigo_2fa, delay=100)
+                    await asyncio.sleep(1)
+                    
+                    # Clica no botão de prosseguir
+                    btn_auth = page.locator('button:has-text("Autenticar"), button:has-text("Confirmar"), button:has-text("Verificar"), button:has-text("Entrar")').filter(has_text=True).first
+                    if await btn_auth.count() > 0 and await btn_auth.is_visible():
+                        await btn_auth.click()
+                    
+                    await page.wait_for_load_state("networkidle")
+                    await asyncio.sleep(3)
+                    print("2FA preenchido com sucesso!")
+            except Exception as e:
+                print(f"Não foi possível preencher o 2FA (talvez não tenha pedido): {e}")
+        else:
+            print("Aviso: CONTA_AZUL_TOTP_SECRET não configurado. Se pedir 2FA, vai falhar.")
+        # ------------------------------------
+
         
         # Processar cada cliente da lista
         for cliente in CLIENTES_ALVO:
