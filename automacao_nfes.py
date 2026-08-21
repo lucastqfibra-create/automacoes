@@ -314,14 +314,14 @@ async def main():
         if CONTA_AZUL_TOTP_SECRET:
             try:
                 print("Verificando se o 2FA foi solicitado...")
-                # Aguarda 5 segundos para o 2FA
+                # Aguarda o título da página de 2FA
                 try:
-                    await page.wait_for_selector('text="código", text="Código", input[autocomplete="one-time-code"]', timeout=5000)
+                    await page.wait_for_selector('text="aplicativo de autenticação"', timeout=5000)
                 except:
                     pass
 
-                # Pegar o primeiro input text que está VISÍVEL
-                input_2fa_locator = page.locator('input[type="text"]:visible, input[type="number"]:visible, input[name="code"]:visible').first
+                # Pegar o primeiro input VISÍVEL (usando xpath genérico para input ou pseudo classe)
+                input_2fa_locator = page.locator('input:visible:not([type="checkbox"])').first
                 
                 if await input_2fa_locator.count() > 0:
                     print("Tela de 2FA detectada. Gerando código...")
