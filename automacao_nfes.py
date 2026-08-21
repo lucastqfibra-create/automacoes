@@ -321,7 +321,7 @@ async def main():
                     pass
 
                 # Pegar o primeiro input text que está VISÍVEL
-                input_2fa_locator = page.locator('input[type="text"], input[type="number"], input[name="code"]').filter(is_visible=True).first
+                input_2fa_locator = page.locator('input[type="text"]:visible, input[type="number"]:visible, input[name="code"]:visible').first
                 
                 if await input_2fa_locator.count() > 0:
                     print("Tela de 2FA detectada. Gerando código...")
@@ -334,7 +334,7 @@ async def main():
                     await input_2fa_locator.fill(codigo_2fa)
                     await asyncio.sleep(1)
                     
-                    btn_auth = page.locator('button:has-text("Autenticar"), button:has-text("Confirmar"), button:has-text("Verificar")').filter(is_visible=True).first
+                    btn_auth = page.locator('button:has-text("Autenticar"):visible, button:has-text("Confirmar"):visible, button:has-text("Verificar"):visible').first
                     if await btn_auth.count() > 0:
                         await btn_auth.click()
                     
