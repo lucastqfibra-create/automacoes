@@ -29,13 +29,11 @@ async def processar_cliente(context, page, cliente_info, sheet):
 
   print(f"\n--- Iniciando processamento para: {nome_cliente} ---")
 
-  # CORREÇÃO 1: Ir direto para a rota de clientes
   print("Acessando lista de clientes no Conta Azul Mais...")
   await page.goto("https://mais.contaazul.com/#/clientes")
   await page.wait_for_load_state("domcontentloaded")
   await asyncio.sleep(2)
 
-  # Se por acaso não abriu direto, tenta o clique seguro no menu
   try:
     if "clientes" not in page.url:
       menu_pai = page.locator("text=Clientes").first
@@ -55,7 +53,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
     await client_row.click(force=True)
     await asyncio.sleep(2)
 
-    # Clicar em Acessar CA Pro que está visível
+    # Clicar em Acessar CA Pro
     btn_pro_els = page.locator('text="Acessar CA Pro"')
     page_pro = None
     for i in range(await btn_pro_els.count()):
@@ -187,7 +185,6 @@ async def processar_cliente(context, page, cliente_info, sheet):
       await page_pro.wait_for_load_state("domcontentloaded")
       await asyncio.sleep(2)
 
-      # Forçar refresh na busca
       try:
         lupa2 = (
             page_pro.locator('input[placeholder*="Pesquisar"]')
@@ -218,36 +215,69 @@ async def processar_cliente(context, page, cliente_info, sheet):
     if vazio:
       print("Nenhuma nota fiscal encontrada no mês atual. O total será 0.")
     else:
-      print("Abrindo menu de exportação (busca robusta)...")
+      print("Abrindo menu de exportação...")
       export_clicked = False
-      for selector in [
-          'div[title="Ações"] .ds-split-button-wrapper-group__trigger button',
+
+      # CORREÇÃO AQUI: Lista com 'button:has-text("Ações")' e variações do Conta Azul
+      seletores_acoes = [
+          'button:has-text("Ações")',
+          'button:has-text("Ações em lote")',
+          'button:has-text("Mais ações")',
           'button:has-text("Exportar")',
-          '[aria-label="Exportar"]',
-          '[aria-label="Opções de exportação"]',
-      ]:
-        try:
-          btn = page_pro.locator(selector).first
-          if await btn.count() > 0 and await btn.is_visible():
-            await btn.click(force=True)
-            await asyncio.sleep(2)
-            exportar_opt = page_pro.locator('text="Exportar planilha"').first
-            if (
-                await exportar_opt.count() > 0
-                and await exportar_opt.is_visible()
-            ):
-              export_clicked = True
-              break
-        except Exception:
-          pass
+          '[aria-label*="Ações"]',
+          '[aria-label*="Exportar"]',
+          '.ds-button-group button',
+          'div[title="Ações"] button',
+      ]
+
+      for seletor in seletores_acoes:
+        botoes = page_pro.locator(seletor)
+        total = await botoes.count()
+        for idx in range(total):
+          btn = botoes.nth(idx)
+          if await btn.is_visible():
+            try:
+              await btn.click(force=True)
+              await asyncio.sleep(1)
+
+              # Confere se a opção de exportar planilha apareceu no dropdown
+              opcao_exportar = page_pro.locator(
+                  'text="Exportar planilha", text="Exportar planilha (Excel)",'
+                  ' [role="menuitem"]:has-text("Exportar"),'
+                  ' li:has-text("Exportar")'
+              ).first
+              if (
+                  await opcao_exportar.count() > 0
+                  and await opcao_exportar.is_visible()
+              ):
+                export_clicked = True
+                print(
+                    f"Menu de exportação aberto com sucesso via '{seletor}'!"
+                )
+                break
+            except Exception:
+              pass
+        if export_clicked:
+          break
 
       if not export_clicked:
-        print("Aviso: Não consegui confirmar a abertura do menu de exportação.")
+        print(
+          "Aviso: Não foi possível confirmar visualmente o dropdown, tentando"
+          " clique direto..."
+        )
 
       print("Clicando em Exportar planilha...")
+      opcao_exportar = page_pro.locator(
+          'text="Exportar planilha", text="Exportar planilha (Excel)",'
+          ' [role="menuitem"]:has-text("Exportar"), li:has-text("Exportar")'
+      ).first
+
       async with page_pro.expect_download(timeout=45000) as download_info:
-        btn_export = page_pro.locator('text="Exportar planilha"').first
-        await btn_export.evaluate("el => el.click()")
+        try:
+          await opcao_exportar.click(timeout=8000)
+        except Exception:
+          await opcao_exportar.evaluate("el => el.click()")
+
       download = await download_info.value
       download_path = await download.path()
       print(f"Planilha baixada em: {download_path}")
@@ -329,7 +359,6 @@ async def processar_cliente(context, page, cliente_info, sheet):
 async def main():
   print("Iniciando automação múltipla...")
 
-  # Conexão com Google Sheets
   scopes = [
       "https://www.googleapis.com/auth/spreadsheets",
       "https://www.googleapis.com/auth/drive",
@@ -342,7 +371,6 @@ async def main():
 
   async with async_playwright() as p:
     browser = await p.chromium.launch(headless=True)
-    # CORREÇÃO 2: Viewport Full HD para a barra lateral ficar 100% visível
     context = await browser.new_context(
         accept_downloads=True,
         viewport={"width": 1920, "height": 1080},
@@ -440,7 +468,6 @@ async def main():
           " falhar."
       )
 
-    # Processar cada cliente da lista
     for cliente in CLIENTES_ALVO:
       await processar_cliente(context, page, cliente, sheet)
 
