@@ -53,40 +53,37 @@ async def processar_cliente(context, page, cliente_info, sheet):
     await client_row.click(force=True)
     await asyncio.sleep(2)
 
-    # Clicar em Acessar CA Pro
-    btn_pro_els = page.locator('button:has-text("Acessar CA Pro"), :has-text("Acessar CA Pro")')
+    # Clicar em Acessar CA Pro de forma direta (sem loops demorados)
+    print("Clicando em Acessar CA Pro...")
+    btn_pro = page.locator('button:has-text("Acessar CA Pro")').first
+    await btn_pro.wait_for(state="visible", timeout=20000)
+
     page_pro = None
-    for i in range(await btn_pro_els.count()):
-      if await btn_pro_els.nth(i).is_visible():
-        try:
-          page_promise = asyncio.create_task(
-              context.wait_for_event("page", timeout=15000)
-          )
+    try:
+      page_promise = asyncio.create_task(
+          context.wait_for_event("page", timeout=20000)
+      )
+      await btn_pro.click(force=True)
+      await asyncio.sleep(2)
 
-          await btn_pro_els.nth(i).click(force=True)
-          await asyncio.sleep(2)
+      modal_confirmar = page.locator('button:has-text("Confirmar")').first
+      if (
+          await modal_confirmar.count() > 0
+          and await modal_confirmar.is_visible()
+      ):
+        print("Modal de sessão ativa detectado. Clicando em Confirmar...")
+        await modal_confirmar.click(force=True)
 
-          modal_confirmar = page.locator('button:has-text("Confirmar")').first
-          if (
-              await modal_confirmar.count() > 0
-              and await modal_confirmar.is_visible()
-          ):
-            print("Modal de sessão ativa detectado. Clicando em Confirmar...")
-            await modal_confirmar.click(force=True)
-
-          page_pro = await page_promise
-          break
-        except Exception as e:
-          print(f"Tentativa de clique {i} falhou: {e}")
+      page_pro = await page_promise
+    except Exception as e:
+      print(f"Aviso no clique do CA Pro: {e}")
 
     if not page_pro:
       await page.screenshot(
           path=f"erro_ca_pro_{nome_cliente.replace(' ', '_')}.png",
           full_page=True,
       )
-      raise Exception(
-          "Não abriu a aba do CA Pro após tentar os botões visíveis!"
-      )
+      raise Exception("Não abriu a aba do CA Pro!")
 
     await page_pro.wait_for_load_state("domcontentloaded")
     print(f"Acessou CA Pro de {nome_cliente}.")
@@ -103,10 +100,9 @@ async def processar_cliente(context, page, cliente_info, sheet):
 
   download_path = None
 
-  # --- Navegação com seletores válidos para Vendas -> NF-e ---
+  # --- Navegação para Vendas -> NF-e ---
   try:
     print("Aguardando carregamento da interface do CA Pro...")
-    # CORREÇÃO: Sintaxe Playwright compatível com CSS
     seletor_menu_vendas = (
         '#PRODUCTS, [id*="PRODUCTS"], :has-text("Vendas"),'
         ' :has-text("Produtos")'
@@ -129,23 +125,11 @@ async def processar_cliente(context, page, cliente_info, sheet):
     print("Acessou a tela de Notas Fiscais de Produto!")
 
     await page_pro.wait_for_load_state("domcontentloaded")
-    await asyncio.sleep(3)
+    # Aguarda o carregamento das notas fiscais via API
+    await asyncio.sleep(5)
 
-    # Verifica se existem notas fiscais na tela
-    vazio = False
-    try:
-      await page_pro.wait_for_selector(
-          ':has-text("Nenhum resultado encontrado")', timeout=8000
-      )
-      vazio = True
-    except Exception:
-      vazio = False
-
-    if vazio:
-      print("Nenhuma nota fiscal encontrada no período inicial.")
-
-    # --- Configurar filtro para "Este mês" ---
-    print("Tentando configurar filtro para 'Este mês'...")
+    # --- Configurar filtro para "Este mês" se disponível ---
+    print("Configurando filtro para 'Este mês'...")
     try:
       meses = [
           "Janeiro",
@@ -172,6 +156,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
           "Hoje",
           "Este ano",
           "Últimos 7 dias",
+          "Período",
       ]:
         btn = page_pro.locator(f'button:has-text("{texto}")').first
         if await btn.count() > 0 and await btn.is_visible():
@@ -181,22 +166,17 @@ async def processar_cliente(context, page, cliente_info, sheet):
 
       if clicou_dropdown:
         await asyncio.sleep(1.5)
-        btn_este_mes = page_pro.locator(':has-text("Este mês")').nth(0)
+        btn_este_mes = page_pro.locator(
+            ':has-text("Este mês"), :has-text("Este Mês")'
+        ).first
         if await btn_este_mes.count() > 0 and await btn_este_mes.is_visible():
           await btn_este_mes.click()
-          print("Filtro alterado para 'Este mês' com sucesso via Playwright!")
-        else:
-          btn_este_mes_alt = page_pro.locator(':has-text("Este Mês")').nth(0)
-          if (
-              await btn_este_mes_alt.count() > 0
-              and await btn_este_mes_alt.is_visible()
-          ):
-            await btn_este_mes_alt.click()
-            print("Filtro alterado para 'Este Mês' com sucesso!")
+          print("Filtro alterado para 'Este mês' com sucesso!")
 
       await page_pro.wait_for_load_state("domcontentloaded")
-      await asyncio.sleep(2)
+      await asyncio.sleep(3)
 
+      # Refresh opcional na busca
       try:
         lupa2 = (
             page_pro.locator('input[placeholder*="Pesquisar"]')
@@ -206,54 +186,41 @@ async def processar_cliente(context, page, cliente_info, sheet):
         )
         if await lupa2.count() > 0 and await lupa2.is_visible():
           await lupa2.click()
-          print("Clicou na lupa para forçar a busca.")
           await page_pro.wait_for_load_state("domcontentloaded")
           await asyncio.sleep(3)
-      except Exception as e:
-        print(f"Não achou a lupa, mas o filtro já deve ter aplicado: {e}")
+      except Exception:
+        pass
 
     except Exception as e:
-      print(f"Não conseguiu alterar o filtro de data: {e}")
+      print(f"Aviso no filtro de data: {e}")
 
-    # Re-verifica se ficou vazio após o filtro
-    try:
-      await page_pro.wait_for_selector(
-          ':has-text("Nenhum resultado encontrado")', timeout=5000
-      )
-      vazio = True
-    except Exception:
-      vazio = False
+    # --- Exportação Direta da Planilha ---
+    print("Abrindo menu de exportação (Ações)...")
+    btn_acoes = page_pro.locator(
+        'button:has-text("Ações"), button:has-text("Ações em lote"),'
+        ' button:has-text("Mais ações"), button:has-text("Exportar"),'
+        ' [aria-label*="Ações"], div[title="Ações"] button'
+    ).first
+    await btn_acoes.wait_for(state="visible", timeout=20000)
+    await btn_acoes.click(force=True)
+    await asyncio.sleep(1.5)
 
-    if vazio:
-      print("Nenhuma nota fiscal encontrada no mês atual. O total será 0.")
-    else:
-      print("Abrindo menu de exportação (Ações)...")
-      # Localiza o botão de Ações no cabeçalho
-      btn_acoes = page_pro.locator(
-          'button:has-text("Ações"), button:has-text("Ações em lote"),'
-          ' button:has-text("Mais ações"), button:has-text("Exportar"),'
-          ' [aria-label*="Ações"], div[title="Ações"] button'
-      ).first
-      await btn_acoes.wait_for(state="visible", timeout=20000)
-      await btn_acoes.click(force=True)
-      await asyncio.sleep(1.5)
+    print("Clicando na opção Exportar planilha...")
+    opcao_exportar = page_pro.locator(
+        ':has-text("Exportar planilha"), [role="menuitem"]:has-text("Exportar"),'
+        ' a:has-text("Exportar"), li:has-text("Exportar")'
+    ).first
+    await opcao_exportar.wait_for(state="visible", timeout=15000)
 
-      print("Clicando na opção Exportar planilha...")
-      opcao_exportar = page_pro.locator(
-          ':has-text("Exportar planilha"), [role="menuitem"]:has-text("Exportar"),'
-          ' a:has-text("Exportar"), li:has-text("Exportar")'
-      ).first
-      await opcao_exportar.wait_for(state="visible", timeout=15000)
+    async with page_pro.expect_download(timeout=45000) as download_info:
+      try:
+        await opcao_exportar.click(timeout=5000)
+      except Exception:
+        await opcao_exportar.evaluate("el => el.click()")
 
-      async with page_pro.expect_download(timeout=45000) as download_info:
-        try:
-          await opcao_exportar.click(timeout=5000)
-        except Exception:
-          await opcao_exportar.evaluate("el => el.click()")
-
-      download = await download_info.value
-      download_path = await download.path()
-      print(f"Planilha baixada em: {download_path}")
+    download = await download_info.value
+    download_path = await download.path()
+    print(f"Planilha baixada em: {download_path}")
 
   except Exception as e:
     print(f"Erro durante a navegação na Conta Azul ({nome_cliente}): {e}")
