@@ -29,21 +29,24 @@ async def processar_cliente(context, page, cliente_info, sheet):
 
   print(f"\n--- Iniciando processamento para: {nome_cliente} ---")
 
-  # Voltar para a tela de clientes
+  # CORREÇÃO 1: Ir direto para a rota de clientes
   print("Acessando lista de clientes no Conta Azul Mais...")
-  await page.goto("https://mais.contaazul.com/#/inicio")
-  # CORREÇÃO: domcontentloaded evita o timeout de 30s do networkidle
+  await page.goto("https://mais.contaazul.com/#/clientes")
   await page.wait_for_load_state("domcontentloaded")
+  await asyncio.sleep(2)
 
+  # Se por acaso não abriu direto, tenta o clique seguro no menu
   try:
-    await page.wait_for_selector('text="Meus clientes"', timeout=20000)
-    menu_locator = page.locator('text="Meus clientes"').first
-    await menu_locator.evaluate("el => el.click()")
+    if "clientes" not in page.url:
+      menu_pai = page.locator("text=Clientes").first
+      if await menu_pai.is_visible():
+        await menu_pai.click()
+        await asyncio.sleep(1)
+      menu_meus_clientes = page.locator('text="Meus clientes"').first
+      await menu_meus_clientes.dispatch_event("click")
+      await page.wait_for_load_state("domcontentloaded")
   except Exception as e:
-    print("Tentando fallback de clique em Meus Clientes...")
-    await page.click('text="Meus clientes"', force=True)
-
-  await page.wait_for_load_state("domcontentloaded")
+    print(f"Tentativa de navegação pelo menu: {e}")
 
   try:
     print(f"Selecionando o cliente {nome_cliente}...")
@@ -58,7 +61,6 @@ async def processar_cliente(context, page, cliente_info, sheet):
     for i in range(await btn_pro_els.count()):
       if await btn_pro_els.nth(i).is_visible():
         try:
-          # Inicia a escuta pelo evento da nova aba em background
           page_promise = asyncio.create_task(
               context.wait_for_event("page", timeout=15000)
           )
@@ -66,7 +68,6 @@ async def processar_cliente(context, page, cliente_info, sheet):
           await btn_pro_els.nth(i).click(force=True)
           await asyncio.sleep(2)
 
-          # Verifica se o modal "Existe uma sessão ativa" apareceu
           modal_confirmar = page.locator('button:has-text("Confirmar")').first
           if (
               await modal_confirmar.count() > 0
@@ -79,7 +80,6 @@ async def processar_cliente(context, page, cliente_info, sheet):
           break
         except Exception as e:
           print(f"Tentativa de clique {i} falhou: {e}")
-          pass
 
     if not page_pro:
       await page.screenshot(
@@ -99,7 +99,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
       screenshot_path = f"erro_{nome_cliente.replace(' ', '_')}.png"
       await page.screenshot(path=screenshot_path)
       print(f"Screenshot de erro salvo em: {screenshot_path}")
-    except:
+    except Exception:
       pass
     return
 
@@ -120,22 +120,21 @@ async def processar_cliente(context, page, cliente_info, sheet):
         break
 
     await page_pro.wait_for_load_state("domcontentloaded")
-    await asyncio.sleep(3)  # Aguardar a lista renderizar inicialmente
+    await asyncio.sleep(3)
 
-    # Verifica se existem notas fiscais na tela
     vazio = False
     try:
       await page_pro.wait_for_selector(
           'text="Nenhum resultado encontrado"', timeout=10000
       )
       vazio = True
-    except:
+    except Exception:
       vazio = False
 
     if vazio:
       print("Nenhuma nota fiscal encontrada no período inicial.")
 
-    # --- NOVO: Forçar o filtro "Este mês" (Puro Playwright) ---
+    # --- Configurar filtro para "Este mês" ---
     print("Tentando configurar filtro para 'Este mês'...")
     try:
       meses = [
@@ -156,8 +155,6 @@ async def processar_cliente(context, page, cliente_info, sheet):
       mes_atual_str = f"{meses[hoje.month - 1]} de {hoje.year}"
 
       clicou_dropdown = False
-
-      # Tenta encontrar o botão pelo texto (ex: "Agosto de 2026" ou "Últimos 30 dias")
       for texto in [
           mes_atual_str,
           "Últimos 30 dias",
@@ -171,11 +168,6 @@ async def processar_cliente(context, page, cliente_info, sheet):
           await btn.click(force=True)
           clicou_dropdown = True
           break
-
-      if not clicou_dropdown:
-        lbl_periodo = page_pro.locator('text="Período"').first
-        if await lbl_periodo.count() > 0:
-          pass
 
       if clicou_dropdown:
         await asyncio.sleep(1.5)
@@ -192,24 +184,24 @@ async def processar_cliente(context, page, cliente_info, sheet):
             await btn_este_mes_alt.click()
             print("Filtro alterado para 'Este Mês' com sucesso!")
 
-        await page_pro.wait_for_load_state("domcontentloaded")
-        await asyncio.sleep(2)
+      await page_pro.wait_for_load_state("domcontentloaded")
+      await asyncio.sleep(2)
 
-        # Forçar o refresh clicando na Lupa de pesquisa
-        try:
-          lupa2 = (
-              page_pro.locator('input[placeholder*="Pesquisar"]')
-              .locator("xpath=..")
-              .locator("button")
-              .first
-          )
-          if await lupa2.count() > 0 and await lupa2.is_visible():
-            await lupa2.click()
-            print("Clicou na lupa para forçar a busca.")
-            await page_pro.wait_for_load_state("domcontentloaded")
-            await asyncio.sleep(3)
-        except Exception as e:
-          print(f"Não achou a lupa, mas o filtro já deve ter aplicado: {e}")
+      # Forçar refresh na busca
+      try:
+        lupa2 = (
+            page_pro.locator('input[placeholder*="Pesquisar"]')
+            .locator("xpath=..")
+            .locator("button")
+            .first
+        )
+        if await lupa2.count() > 0 and await lupa2.is_visible():
+          await lupa2.click()
+          print("Clicou na lupa para forçar a busca.")
+          await page_pro.wait_for_load_state("domcontentloaded")
+          await asyncio.sleep(3)
+      except Exception as e:
+        print(f"Não achou a lupa, mas o filtro já deve ter aplicado: {e}")
 
     except Exception as e:
       print(f"Não conseguiu alterar o filtro de data: {e}")
@@ -220,14 +212,13 @@ async def processar_cliente(context, page, cliente_info, sheet):
           'text="Nenhum resultado encontrado"', timeout=5000
       )
       vazio = True
-    except:
+    except Exception:
       vazio = False
 
     if vazio:
       print("Nenhuma nota fiscal encontrada no mês atual. O total será 0.")
     else:
       print("Abrindo menu de exportação (busca robusta)...")
-
       export_clicked = False
       for selector in [
           'div[title="Ações"] .ds-split-button-wrapper-group__trigger button',
@@ -247,7 +238,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
             ):
               export_clicked = True
               break
-        except:
+        except Exception:
           pass
 
       if not export_clicked:
@@ -267,7 +258,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
       screenshot_path = f"erro_{nome_cliente.replace(' ', '_')}.png"
       await page_pro.screenshot(path=screenshot_path)
       print(f"Screenshot de erro salvo em: {screenshot_path}")
-    except:
+    except Exception:
       pass
     await page_pro.close()
     return
@@ -281,7 +272,6 @@ async def processar_cliente(context, page, cliente_info, sheet):
     except UnicodeDecodeError:
       df = pd.read_csv(download_path, sep=";", encoding="latin1")
 
-    # Definir CFOPs aceitos por cliente
     if "Fibrart" in nome_cliente:
       cfops_validos = ["5101", "6101"]
     elif "Afonso" in nome_cliente:
@@ -339,7 +329,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
 async def main():
   print("Iniciando automação múltipla...")
 
-  # Preparar conexão com Google Sheets primeiro
+  # Conexão com Google Sheets
   scopes = [
       "https://www.googleapis.com/auth/spreadsheets",
       "https://www.googleapis.com/auth/drive",
@@ -352,9 +342,10 @@ async def main():
 
   async with async_playwright() as p:
     browser = await p.chromium.launch(headless=True)
+    # CORREÇÃO 2: Viewport Full HD para a barra lateral ficar 100% visível
     context = await browser.new_context(
         accept_downloads=True,
-        viewport={"width": 1041, "height": 947},
+        viewport={"width": 1920, "height": 1080},
         locale="pt-BR",
         timezone_id="America/Sao_Paulo",
     )
@@ -362,6 +353,7 @@ async def main():
 
     print("Acessando Conta Azul...")
     await page.goto("https://mais.contaazul.com/#/login")
+    await page.wait_for_load_state("domcontentloaded")
 
     await page.fill('input[type="email"]', CONTA_AZUL_EMAIL)
     await page.fill('input[type="password"]', CONTA_AZUL_PASSWORD)
@@ -369,7 +361,7 @@ async def main():
     await page.wait_for_load_state("domcontentloaded")
     await asyncio.sleep(2)
 
-    # --- Lógica de 2FA com PyOTP Corrigida ---
+    # --- Lógica de 2FA Robusta ---
     if CONTA_AZUL_TOTP_SECRET:
       try:
         print("Verificando se o 2FA foi solicitado...")
@@ -379,7 +371,7 @@ async def main():
 
         try:
           await page.wait_for_selector(seletor_inputs, timeout=6000)
-        except:
+        except Exception:
           pass
 
         inputs_2fa = page.locator(seletor_inputs)
@@ -389,7 +381,6 @@ async def main():
           print("Tela de 2FA detectada. Gerando código...")
           import pyotp
 
-          # Garante que não vai gerar o código nos últimos 5 segundos do ciclo
           tempo_restante = 30 - (int(time.time()) % 30)
           if tempo_restante < 5:
             await asyncio.sleep(tempo_restante + 1)
@@ -421,19 +412,18 @@ async def main():
           if await btn_auth.count() > 0 and await btn_auth.is_visible():
             try:
               await btn_auth.click(timeout=3000)
-            except:
+            except Exception:
               pass
 
           await page.wait_for_load_state("domcontentloaded")
           await asyncio.sleep(3)
 
-        # Checar se ainda estamos no login/2FA
         if "login" in page.url:
           print("ALERTA: Parece que o 2FA não passou! Tirando screenshot...")
           await page.screenshot(path="erro_2fa_falhou.png", full_page=True)
-          raise Exception(
-              "2FA preenchido, mas não autenticou. Código inválido ou erro no"
-              " clique."
+          raise RuntimeError(
+              "2FA preenchido, mas não autenticou. Verifique o segredo ou o"
+              " seletor."
           )
 
         print("2FA preenchido com sucesso!")
@@ -442,7 +432,6 @@ async def main():
         raise
       except Exception as e:
         print(f"Erro no fluxo do 2FA: {e}")
-        # CORREÇÃO CRÍTICA: Interrompe o navegador e encerra para NÃO continuar deslogado
         await browser.close()
         raise e
     else:
@@ -450,7 +439,6 @@ async def main():
           "Aviso: CONTA_AZUL_TOTP_SECRET não configurado. Se pedir 2FA, vai"
           " falhar."
       )
-    # ------------------------------------
 
     # Processar cada cliente da lista
     for cliente in CLIENTES_ALVO:
