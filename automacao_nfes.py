@@ -53,7 +53,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
     await client_row.click(force=True)
     await asyncio.sleep(2)
 
-    # Clicar em Acessar CA Pro de forma direta (sem loops demorados)
+    # Clicar em Acessar CA Pro de forma direta
     print("Clicando em Acessar CA Pro...")
     btn_pro = page.locator('button:has-text("Acessar CA Pro")').first
     await btn_pro.wait_for(state="visible", timeout=20000)
@@ -125,8 +125,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
     print("Acessou a tela de Notas Fiscais de Produto!")
 
     await page_pro.wait_for_load_state("domcontentloaded")
-    # Aguarda o carregamento das notas fiscais via API
-    await asyncio.sleep(5)
+    await asyncio.sleep(4)
 
     # --- Configurar filtro para "Este mês" se disponível ---
     print("Configurando filtro para 'Este mês'...")
@@ -194,16 +193,47 @@ async def processar_cliente(context, page, cliente_info, sheet):
     except Exception as e:
       print(f"Aviso no filtro de data: {e}")
 
-    # --- Exportação Direta da Planilha ---
+    # --- CORREÇÃO: Abertura do Split Button de Ações ---
     print("Abrindo menu de exportação (Ações)...")
-    btn_acoes = page_pro.locator(
-        'button:has-text("Ações"), button:has-text("Ações em lote"),'
-        ' button:has-text("Mais ações"), button:has-text("Exportar"),'
-        ' [aria-label*="Ações"], div[title="Ações"] button'
-    ).first
-    await btn_acoes.wait_for(state="visible", timeout=20000)
-    await btn_acoes.click(force=True)
-    await asyncio.sleep(1.5)
+    menu_aberto = False
+
+    # Lista de seletores focando na setinha (trigger) do split button
+    seletores_gatilho_acoes = [
+        (  # Gatilho da setinha do split button (padrão Conta Azul)
+            'div[title="Ações"]'
+            " .ds-split-button-wrapper-group__trigger button"
+        ),
+        (
+            '.ds-split-button-wrapper-group__trigger button'
+        ),  # Trigger direto da classe
+        (
+            'div[title="Ações"] button:last-child'
+        ),  # O segundo botão é a setinha
+        'div[title="Ações"] button',  # Qualquer botão do container Ações
+        'button:has-text("Ações")',  # Botão Ações com texto
+        '[aria-label*="Ações"]',  # Botão com aria-label
+    ]
+
+    for sel in seletores_gatilho_acoes:
+      gatilhos = page_pro.locator(sel)
+      total = await gatilhos.count()
+      for idx in range(total):
+        btn = gatilhos.nth(idx)
+        if await btn.is_visible():
+          try:
+            await btn.click(force=True)
+            await asyncio.sleep(1)
+
+            # Verifica se a opção de exportar apareceu no DOM
+            opt = page_pro.locator(':has-text("Exportar planilha")').first
+            if await opt.count() > 0 and await opt.is_visible():
+              print(f"Menu de exportação aberto com sucesso via: {sel}")
+              menu_aberto = True
+              break
+          except Exception:
+            pass
+      if menu_aberto:
+        break
 
     print("Clicando na opção Exportar planilha...")
     opcao_exportar = page_pro.locator(
