@@ -36,11 +36,11 @@ async def processar_cliente(context, page, cliente_info, sheet):
 
   try:
     if "clientes" not in page.url:
-      menu_pai = page.locator("text=Clientes").first
+      menu_pai = page.locator(':has-text("Clientes")').first
       if await menu_pai.is_visible():
         await menu_pai.click()
         await asyncio.sleep(1)
-      menu_meus_clientes = page.locator('text="Meus clientes"').first
+      menu_meus_clientes = page.locator(':has-text("Meus clientes")').first
       await menu_meus_clientes.dispatch_event("click")
       await page.wait_for_load_state("domcontentloaded")
   except Exception as e:
@@ -54,7 +54,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
     await asyncio.sleep(2)
 
     # Clicar em Acessar CA Pro
-    btn_pro_els = page.locator('text="Acessar CA Pro"')
+    btn_pro_els = page.locator('button:has-text("Acessar CA Pro"), :has-text("Acessar CA Pro")')
     page_pro = None
     for i in range(await btn_pro_els.count()):
       if await btn_pro_els.nth(i).is_visible():
@@ -103,26 +103,27 @@ async def processar_cliente(context, page, cliente_info, sheet):
 
   download_path = None
 
-  # --- CORREÇÃO: Navegação com espera real para Vendas -> Notas fiscais de produto ---
+  # --- Navegação com seletores válidos para Vendas -> NF-e ---
   try:
     print("Aguardando carregamento da interface do CA Pro...")
-    await page_pro.wait_for_selector(
-        '#PRODUCTS, [id*="PRODUCTS"], text="Vendas", text="Produtos"',
-        timeout=25000,
+    # CORREÇÃO: Sintaxe Playwright compatível com CSS
+    seletor_menu_vendas = (
+        '#PRODUCTS, [id*="PRODUCTS"], :has-text("Vendas"),'
+        ' :has-text("Produtos")'
     )
+    menu_vendas = page_pro.locator(seletor_menu_vendas).first
+    await menu_vendas.wait_for(state="visible", timeout=25000)
     await asyncio.sleep(1)
 
     print("Navegando pelo menu Vendas -> NF-e...")
-    menu_vendas = page_pro.locator(
-        '#PRODUCTS, [id*="PRODUCTS"], text="Vendas", text="Produtos"'
-    ).first
     await menu_vendas.click(force=True)
     await asyncio.sleep(1.5)
 
-    menu_nfe = page_pro.locator(
-        '#SALES_CONTROL_PRODUCT_INVOICE, text="Notas fiscais de produto",'
-        ' text="Notas fiscais", a:has-text("Notas fiscais")'
-    ).first
+    seletor_menu_nfe = (
+        '#SALES_CONTROL_PRODUCT_INVOICE, :has-text("Notas fiscais de produto"),'
+        ' :has-text("Notas fiscais")'
+    )
+    menu_nfe = page_pro.locator(seletor_menu_nfe).first
     await menu_nfe.wait_for(state="visible", timeout=15000)
     await menu_nfe.click(force=True)
     print("Acessou a tela de Notas Fiscais de Produto!")
@@ -134,7 +135,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
     vazio = False
     try:
       await page_pro.wait_for_selector(
-          'text="Nenhum resultado encontrado"', timeout=8000
+          ':has-text("Nenhum resultado encontrado")', timeout=8000
       )
       vazio = True
     except Exception:
@@ -180,12 +181,12 @@ async def processar_cliente(context, page, cliente_info, sheet):
 
       if clicou_dropdown:
         await asyncio.sleep(1.5)
-        btn_este_mes = page_pro.locator('text="Este mês"').nth(0)
+        btn_este_mes = page_pro.locator(':has-text("Este mês")').nth(0)
         if await btn_este_mes.count() > 0 and await btn_este_mes.is_visible():
           await btn_este_mes.click()
           print("Filtro alterado para 'Este mês' com sucesso via Playwright!")
         else:
-          btn_este_mes_alt = page_pro.locator('text="Este Mês"').nth(0)
+          btn_este_mes_alt = page_pro.locator(':has-text("Este Mês")').nth(0)
           if (
               await btn_este_mes_alt.count() > 0
               and await btn_este_mes_alt.is_visible()
@@ -217,7 +218,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
     # Re-verifica se ficou vazio após o filtro
     try:
       await page_pro.wait_for_selector(
-          'text="Nenhum resultado encontrado"', timeout=5000
+          ':has-text("Nenhum resultado encontrado")', timeout=5000
       )
       vazio = True
     except Exception:
@@ -227,7 +228,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
       print("Nenhuma nota fiscal encontrada no mês atual. O total será 0.")
     else:
       print("Abrindo menu de exportação (Ações)...")
-      # Aguarda e clica no botão de Ações no cabeçalho
+      # Localiza o botão de Ações no cabeçalho
       btn_acoes = page_pro.locator(
           'button:has-text("Ações"), button:has-text("Ações em lote"),'
           ' button:has-text("Mais ações"), button:has-text("Exportar"),'
@@ -239,9 +240,8 @@ async def processar_cliente(context, page, cliente_info, sheet):
 
       print("Clicando na opção Exportar planilha...")
       opcao_exportar = page_pro.locator(
-          'text="Exportar planilha", text="Exportar planilha (Excel)",'
-          ' [role="menuitem"]:has-text("Exportar"), a:has-text("Exportar"),'
-          ' li:has-text("Exportar")'
+          ':has-text("Exportar planilha"), [role="menuitem"]:has-text("Exportar"),'
+          ' a:has-text("Exportar"), li:has-text("Exportar")'
       ).first
       await opcao_exportar.wait_for(state="visible", timeout=15000)
 
