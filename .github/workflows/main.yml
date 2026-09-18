@@ -1,8 +1,13 @@
-name: Executar Automação NFes
+name: Atualização de Notas Fiscais
 
 on:
-  repository_dispatch:
-    types: [atualizar-emissoes]
+  schedule:
+    # Executa todos os dias às 07:00 (Horário de Brasília / 10:00 UTC)
+    - cron: '0 10 * * *'
+    # Executa todos os dias às 14:00 (Horário de Brasília / 17:00 UTC)
+    - cron: '0 17 * * *'
+
+  # Mantém o botão manual "Run workflow" caso queira disparar fora de hora
   workflow_dispatch:
 
 jobs:
