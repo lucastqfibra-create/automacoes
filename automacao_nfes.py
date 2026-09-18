@@ -102,28 +102,39 @@ async def processar_cliente(context, page, cliente_info, sheet):
     return
 
   download_path = None
-  # Navegando pelo menu Vendas -> NF-e
+
+  # --- CORREÇÃO: Navegação com espera real para Vendas -> Notas fiscais de produto ---
   try:
-    vendas_els = page_pro.locator('//*[@id="PRODUCTS"]/div/div')
-    for i in range(await vendas_els.count()):
-      if await vendas_els.nth(i).is_visible():
-        await vendas_els.nth(i).click(force=True)
-        break
+    print("Aguardando carregamento da interface do CA Pro...")
+    await page_pro.wait_for_selector(
+        '#PRODUCTS, [id*="PRODUCTS"], text="Vendas", text="Produtos"',
+        timeout=25000,
+    )
     await asyncio.sleep(1)
 
-    nfe_els = page_pro.locator('//*[@id="SALES_CONTROL_PRODUCT_INVOICE"]')
-    for i in range(await nfe_els.count()):
-      if await nfe_els.nth(i).is_visible():
-        await nfe_els.nth(i).click(force=True)
-        break
+    print("Navegando pelo menu Vendas -> NF-e...")
+    menu_vendas = page_pro.locator(
+        '#PRODUCTS, [id*="PRODUCTS"], text="Vendas", text="Produtos"'
+    ).first
+    await menu_vendas.click(force=True)
+    await asyncio.sleep(1.5)
+
+    menu_nfe = page_pro.locator(
+        '#SALES_CONTROL_PRODUCT_INVOICE, text="Notas fiscais de produto",'
+        ' text="Notas fiscais", a:has-text("Notas fiscais")'
+    ).first
+    await menu_nfe.wait_for(state="visible", timeout=15000)
+    await menu_nfe.click(force=True)
+    print("Acessou a tela de Notas Fiscais de Produto!")
 
     await page_pro.wait_for_load_state("domcontentloaded")
     await asyncio.sleep(3)
 
+    # Verifica se existem notas fiscais na tela
     vazio = False
     try:
       await page_pro.wait_for_selector(
-          'text="Nenhum resultado encontrado"', timeout=10000
+          'text="Nenhum resultado encontrado"', timeout=8000
       )
       vazio = True
     except Exception:
@@ -215,66 +226,28 @@ async def processar_cliente(context, page, cliente_info, sheet):
     if vazio:
       print("Nenhuma nota fiscal encontrada no mês atual. O total será 0.")
     else:
-      print("Abrindo menu de exportação...")
-      export_clicked = False
+      print("Abrindo menu de exportação (Ações)...")
+      # Aguarda e clica no botão de Ações no cabeçalho
+      btn_acoes = page_pro.locator(
+          'button:has-text("Ações"), button:has-text("Ações em lote"),'
+          ' button:has-text("Mais ações"), button:has-text("Exportar"),'
+          ' [aria-label*="Ações"], div[title="Ações"] button'
+      ).first
+      await btn_acoes.wait_for(state="visible", timeout=20000)
+      await btn_acoes.click(force=True)
+      await asyncio.sleep(1.5)
 
-      # CORREÇÃO AQUI: Lista com 'button:has-text("Ações")' e variações do Conta Azul
-      seletores_acoes = [
-          'button:has-text("Ações")',
-          'button:has-text("Ações em lote")',
-          'button:has-text("Mais ações")',
-          'button:has-text("Exportar")',
-          '[aria-label*="Ações"]',
-          '[aria-label*="Exportar"]',
-          '.ds-button-group button',
-          'div[title="Ações"] button',
-      ]
-
-      for seletor in seletores_acoes:
-        botoes = page_pro.locator(seletor)
-        total = await botoes.count()
-        for idx in range(total):
-          btn = botoes.nth(idx)
-          if await btn.is_visible():
-            try:
-              await btn.click(force=True)
-              await asyncio.sleep(1)
-
-              # Confere se a opção de exportar planilha apareceu no dropdown
-              opcao_exportar = page_pro.locator(
-                  'text="Exportar planilha", text="Exportar planilha (Excel)",'
-                  ' [role="menuitem"]:has-text("Exportar"),'
-                  ' li:has-text("Exportar")'
-              ).first
-              if (
-                  await opcao_exportar.count() > 0
-                  and await opcao_exportar.is_visible()
-              ):
-                export_clicked = True
-                print(
-                    f"Menu de exportação aberto com sucesso via '{seletor}'!"
-                )
-                break
-            except Exception:
-              pass
-        if export_clicked:
-          break
-
-      if not export_clicked:
-        print(
-          "Aviso: Não foi possível confirmar visualmente o dropdown, tentando"
-          " clique direto..."
-        )
-
-      print("Clicando em Exportar planilha...")
+      print("Clicando na opção Exportar planilha...")
       opcao_exportar = page_pro.locator(
           'text="Exportar planilha", text="Exportar planilha (Excel)",'
-          ' [role="menuitem"]:has-text("Exportar"), li:has-text("Exportar")'
+          ' [role="menuitem"]:has-text("Exportar"), a:has-text("Exportar"),'
+          ' li:has-text("Exportar")'
       ).first
+      await opcao_exportar.wait_for(state="visible", timeout=15000)
 
       async with page_pro.expect_download(timeout=45000) as download_info:
         try:
-          await opcao_exportar.click(timeout=8000)
+          await opcao_exportar.click(timeout=5000)
         except Exception:
           await opcao_exportar.evaluate("el => el.click()")
 
