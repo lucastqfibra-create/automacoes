@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+import io
 import os
 import time
 from dotenv import load_dotenv
@@ -21,6 +22,88 @@ CLIENTES_ALVO = [
     {"nome": "Fibrart", "celula": "Q11"},
     {"nome": "Afonso Morais", "celula": "R11"},
 ]
+
+
+def carregar_planilha(caminho_arquivo):
+  """Carrega a planilha baixada do Conta Azul com suporte a CSV, XLSX e XLS,
+
+  detectando automaticamente a linha de cabeçalho real.
+  """
+  with open(caminho_arquivo, "rb") as f:
+    cabecalho_bytes = f.read(2048)
+
+  # 1. Se for XLSX (ZIP container: PK\x03\x04)
+  if cabecalho_bytes.startswith(b"PK\x03\x04"):
+    print("Formato detectado: Excel .xlsx")
+    try:
+      return pd.read_excel(caminho_arquivo, engine="openpyxl")
+    except Exception:
+      return pd.read_excel(caminho_arquivo)
+
+  # 2. Se for XLS binário antigo
+  if cabecalho_bytes.startswith(b"\xd0\xcf\x11\xe0"):
+    print("Formato detectado: Excel .xls binário")
+    try:
+      return pd.read_excel(caminho_arquivo)
+    except Exception:
+      pass
+
+  # 3. Se for tabela HTML
+  if b"<html" in cabecalho_bytes.lower() or b"<table" in cabecalho_bytes.lower():
+    print("Formato detectado: Tabela HTML")
+    dfs = pd.read_html(caminho_arquivo)
+    if dfs:
+      return dfs[0]
+
+  # 4. Tratar como CSV / Texto com cabeçalho variável
+  print("Processando arquivo como CSV/Texto...")
+  for enc in ["utf-8", "latin1", "cp1252"]:
+    try:
+      with open(caminho_arquivo, "r", encoding=enc) as f:
+        linhas = [f.readline() for _ in range(20)]
+
+      # Descobrir qual linha contém o cabeçalho real das notas
+      linha_cabecalho = 0
+      for idx, linha in enumerate(linhas):
+        l_upper = linha.upper()
+        if (
+            "CFOP" in l_upper
+            or "NÚMERO" in l_upper
+            or "NUMERO" in l_upper
+            or "NFE" in l_upper
+        ):
+          linha_cabecalho = idx
+          break
+
+      for sep in [";", ",", "\t"]:
+        try:
+          df = pd.read_csv(
+              caminho_arquivo,
+              sep=sep,
+              encoding=enc,
+              skiprows=linha_cabecalho,
+              on_bad_lines="skip",
+          )
+          colunas_str = " ".join([str(c).upper() for c in df.columns])
+          if (
+              "CFOP" in colunas_str
+              or "NFE" in colunas_str
+              or "NUMERO" in colunas_str
+          ):
+            print(
+                f"CSV lido com sucesso! (sep='{sep}', skiprows={linha_cabecalho},"
+                f" encoding='{enc}')"
+            )
+            return df
+        except Exception:
+          continue
+    except Exception:
+      continue
+
+  # Fallback com engine python
+  return pd.read_csv(
+      caminho_arquivo, sep=None, engine="python", on_bad_lines="skip"
+  )
 
 
 async def processar_cliente(context, page, cliente_info, sheet):
@@ -193,26 +276,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
       print(f"Aviso no filtro de data: {e}")
 
     # --- Exportação da Planilha de NF-e ---
-    print("Inspecionando cabeçalho da página de notas...")
-    elementos_cabecalho = await page_pro.evaluate("""() => {
-        return Array.from(document.querySelectorAll('button, a, [role="button"], div[title], [aria-label]'))
-            .filter(el => {
-                const rect = el.getBoundingClientRect();
-                const isHeader = rect.top < 450 && rect.height > 5 && rect.width > 5;
-                const insideRow = el.closest('tbody tr');
-                return isHeader && !insideRow;
-            })
-            .map(el => ({
-                tag: el.tagName,
-                text: (el.innerText || el.textContent || '').trim().substring(0, 35),
-                title: el.getAttribute('title') || '',
-                className: el.className ? el.className.toString() : ''
-            }))
-            .filter(x => x.text || x.title);
-    }""")
-    print(f"Botões do cabeçalho detectados: {elementos_cabecalho}")
-
-    # 1. Marcar checkbox do cabeçalho (selecionar todas as notas)
+    # 1. Marcar checkbox do cabeçalho da tabela (selecionar todas as notas)
     try:
       chk_todos = page_pro.locator(
           'th input[type="checkbox"], thead input[type="checkbox"]'
@@ -220,13 +284,13 @@ async def processar_cliente(context, page, cliente_info, sheet):
       if await chk_todos.count() > 0 and await chk_todos.is_visible():
         if not await chk_todos.is_checked():
           await chk_todos.click(force=True)
-          print("Checkbox de selecionar todas as notas marcado!")
+          print("Checkbox de selecionar todas as notas marcado com sucesso!")
           await asyncio.sleep(1)
     except Exception as e:
       print(f"Aviso no checkbox da tabela: {e}")
 
-    # 2. Clicar no botão 'Ações' da barra superior (excluindo linhas individuais)
-    print("Abrindo menu de exportação (Ações)...")
+    # 2. Clicar no botão 'Ações' da barra superior (excluindo linhas de notas)
+    print("Abrindo menu de exportação (Ações no cabeçalho)...")
     clicou_menu = False
     btn_acoes_header = (
         page_pro.locator(
@@ -291,12 +355,38 @@ async def processar_cliente(context, page, cliente_info, sheet):
 
   await page_pro.close()
 
+  # --- Leitura Inteligente dos Dados Baixados ---
   if download_path:
-    print("Processando dados do CSV baixado...")
-    try:
-      df = pd.read_csv(download_path, sep=";", encoding="utf-8")
-    except UnicodeDecodeError:
-      df = pd.read_csv(download_path, sep=";", encoding="latin1")
+    print("Processando dados do arquivo baixado...")
+    df = carregar_planilha(download_path)
+
+    # Identificar nomes das colunas de forma flexível
+    col_cfop = next(
+        (c for c in df.columns if "CFOP" in str(c).upper()), "CFOP"
+    )
+    col_numero = next(
+        (
+            c
+            for c in df.columns
+            if "NÚMERO" in str(c).upper()
+            or "NUMERO" in str(c).upper()
+            or "NFE" in str(c).upper()
+        ),
+        "Número da NFe",
+    )
+    col_total = next(
+        (
+            c
+            for c in df.columns
+            if "TOTAL" in str(c).upper() or "VALOR" in str(c).upper()
+        ),
+        "Total NF-e",
+    )
+
+    print(
+        f"Colunas mapeadas: CFOP='{col_cfop}', Número='{col_numero}',"
+        f" Total='{col_total}'"
+    )
 
     if "Fibrart" in nome_cliente:
       cfops_validos = ["5101", "6101"]
@@ -306,8 +396,17 @@ async def processar_cliente(context, page, cliente_info, sheet):
       cfops_validos = ["5101"]
 
     padrao_regex = "|".join(cfops_validos)
-    df_filtrado = df[df["CFOP"].str.contains(padrao_regex, na=False)]
-    df_unique_nfe = df_filtrado.drop_duplicates(subset=["Número da NFe"])
+
+    if col_cfop in df.columns:
+      df[col_cfop] = df[col_cfop].astype(str)
+      df_filtrado = df[df[col_cfop].str.contains(padrao_regex, na=False)]
+    else:
+      df_filtrado = df
+
+    if col_numero in df_filtrado.columns:
+      df_unique_nfe = df_filtrado.drop_duplicates(subset=[col_numero])
+    else:
+      df_unique_nfe = df_filtrado
 
     def parse_money(valor_str):
       if pd.isna(valor_str):
@@ -324,10 +423,10 @@ async def processar_cliente(context, page, cliente_info, sheet):
       except ValueError:
         return 0.0
 
-    if df_unique_nfe.empty:
+    if df_unique_nfe.empty or col_total not in df_unique_nfe.columns:
       total_cfop = 0.0
     else:
-      df_unique_nfe["Total NF-e Num"] = df_unique_nfe["Total NF-e"].apply(
+      df_unique_nfe["Total NF-e Num"] = df_unique_nfe[col_total].apply(
           parse_money
       )
       total_cfop = df_unique_nfe["Total NF-e Num"].sum()
@@ -385,19 +484,16 @@ async def main():
 
     print("Aguardando autenticação...")
 
-    # Polling resiliente de até 15 segundos para transição do login / 2FA
     autenticado = False
     for _ in range(15):
       await asyncio.sleep(1)
       url_atual = page.url
 
-      # Se já saiu da tela de login e foi para clientes ou dashboard
       if "login" not in url_atual and "auth" not in url_atual:
         print(f"Login direto realizado com sucesso! URL: {url_atual}")
         autenticado = True
         break
 
-      # Verifica se a tela de 2FA apareceu
       inputs_visiveis = page.locator(
           'input:visible:not([type="checkbox"]):not([type="radio"])'
       )
@@ -450,7 +546,6 @@ async def main():
           except Exception:
             pass
 
-        # Aguarda sair da tela de autenticação
         for _ in range(12):
           await asyncio.sleep(1)
           if "login" not in page.url and "auth" not in page.url:
@@ -469,7 +564,7 @@ async def main():
     for cliente in CLIENTES_ALVO:
       await processar_cliente(context, page, cliente, sheet)
 
-    print("\nTodos os clientes foram processados!")
+    print("\nTodos os clientes foram processados com sucesso!")
     await browser.close()
 
 
