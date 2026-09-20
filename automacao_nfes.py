@@ -1,7 +1,6 @@
 import asyncio
 import datetime
 import os
-import re
 import subprocess
 import sys
 import time
@@ -150,7 +149,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
       await menu_meus_clientes.dispatch_event("click")
       await page.wait_for_load_state("domcontentloaded")
   except Exception as e:
-    print(f"Aviso menu: {e}")
+    print(f"Aviso menu clientes: {e}")
 
   try:
     print(f"Selecionando o cliente {nome_cliente}...")
@@ -204,30 +203,39 @@ async def processar_cliente(context, page, cliente_info, sheet):
   download_path = None
 
   try:
-    print("Aguardando interface do CA Pro...")
-    seletor_menu_vendas = (
-        '#PRODUCTS, [id*="PRODUCTS"], :has-text("Vendas"),'
-        ' :has-text("Produtos")'
-    )
-    menu_vendas = page_pro.locator(seletor_menu_vendas).first
-    await menu_vendas.wait_for(state="visible", timeout=25000)
-    await asyncio.sleep(1)
+    print("Aguardando carregamento inicial do CA Pro...")
+    await asyncio.sleep(3)
 
-    print("Navegando para Vendas -> NF-e...")
-    await menu_vendas.click(force=True)
-    await asyncio.sleep(1.5)
+    # NAVEGAÇÃO DIRETA PARA NOTAS FISCAIS DE PRODUTO
+    print("Navegando diretamente para a URL de Notas Fiscais de Produto...")
+    url_base = page_pro.url.split("#")[0]
+    url_nfe = f"{url_base}#/vendas/notas-fiscais-produto"
+    print(f"URL de destino: {url_nfe}")
 
-    seletor_menu_nfe = (
-        '#SALES_CONTROL_PRODUCT_INVOICE, :has-text("Notas fiscais de produto"),'
-        ' :has-text("Notas fiscais")'
-    )
-    menu_nfe = page_pro.locator(seletor_menu_nfe).first
-    await menu_nfe.wait_for(state="visible", timeout=15000)
-    await menu_nfe.click(force=True)
-    print("Acessou tela de Notas Fiscais!")
-
+    await page_pro.goto(url_nfe)
     await page_pro.wait_for_load_state("domcontentloaded")
     await asyncio.sleep(4)
+
+    # Caso a URL direta não carregue a tela, usa o clique com seletor específico
+    if "notas-fiscais" not in page_pro.url:
+      print("Tentando navegação reforçada pelo menu lateral...")
+      btn_vendas = page_pro.locator(
+          'a:has-text("Vendas"), button:has-text("Vendas"),'
+          ' [data-testid*="sales"], [id*="PRODUCTS"]'
+      ).first
+      if await btn_vendas.count() > 0 and await btn_vendas.is_visible():
+        await btn_vendas.click(force=True)
+        await asyncio.sleep(1.5)
+
+      link_nfe = page_pro.locator(
+          'a[href*="notas-fiscais"], :has-text("Notas fiscais de produto")'
+      ).first
+      if await link_nfe.count() > 0 and await link_nfe.is_visible():
+        await link_nfe.click(force=True)
+        await page_pro.wait_for_load_state("domcontentloaded")
+        await asyncio.sleep(3)
+
+    print(f"URL atual após navegação: {page_pro.url}")
 
     # Configurar filtro para "Este mês"
     print("Configurando filtro para 'Este mês'...")
@@ -302,58 +310,43 @@ async def processar_cliente(context, page, cliente_info, sheet):
       await page_pro.close()
       return
 
-    # Marcar checkbox para selecionar todas as notas
+    # 1. Tentar marcar o checkbox ou botão 'Selecionar todas'
     try:
-      chk_todos = page_pro.locator(
-          'th input[type="checkbox"], thead input[type="checkbox"]'
-      ).first
-      if await chk_todos.count() > 0 and await chk_todos.is_visible():
-        if not await chk_todos.is_checked():
-          await chk_todos.click(force=True)
-          print("Checkbox de selecionar todas as notas marcado!")
-          await asyncio.sleep(1)
+      btn_sel_todas = page_pro.locator('button:has-text("Selecionar todas")').first
+      if await btn_sel_todas.count() > 0 and await btn_sel_todas.is_visible():
+        await btn_sel_todas.click(force=True)
+        print("Clicou no botão 'Selecionar todas'!")
+        await asyncio.sleep(1)
+      else:
+        chk_todos = page_pro.locator(
+            'th input[type="checkbox"], thead input[type="checkbox"]'
+        ).first
+        if await chk_todos.count() > 0 and await chk_todos.is_visible():
+          if not await chk_todos.is_checked():
+            await chk_todos.click(force=True)
+            print("Checkbox de cabeçalho marcado!")
+            await asyncio.sleep(1)
     except Exception as e:
-      print(f"Aviso no checkbox: {e}")
+      print(f"Aviso na seleção: {e}")
 
-    # Clicar no botão 'Ações' do cabeçalho
-    print("Abrindo menu Ações do cabeçalho...")
-    clicou_menu = False
-    btn_acoes_header = (
-        page_pro.locator(
-            'button:has-text("Ações"), button:has-text("Ações em lote"),'
-            ' [aria-label*="Ações"], div[title="Ações"] button'
-        )
-        .filter(has_not=page_pro.locator("tbody tr *"))
-        .first
-    )
+    # 2. Clicar no botão 'Ações em lote', 'Ações' ou 'Exportar'
+    print("Abrindo menu de exportação...")
+    btn_exportar = page_pro.locator(
+        'button:has-text("Exportar"):visible,'
+        ' button:has-text("Ações em lote"):visible,'
+        ' button:has-text("Ações"):visible'
+    ).filter(has_not=page_pro.locator("tbody tr *"))
 
-    if await btn_acoes_header.count() > 0 and await btn_acoes_header.is_visible():
-      try:
-        await btn_acoes_header.hover()
-      except Exception:
-        pass
-      await btn_acoes_header.click(force=True)
-      clicou_menu = True
+    if await btn_exportar.count() > 0:
+      await btn_exportar.first.click(force=True)
       await asyncio.sleep(1.5)
 
-    if not clicou_menu:
-      await page_pro.evaluate("""() => {
-          const els = Array.from(document.querySelectorAll('button, a, [role="button"]'))
-              .filter(el => {
-                  const t = (el.innerText || '').trim();
-                  return (t === 'Ações' || t === 'Ações em lote' || t.includes('Exportar')) && !el.closest('tbody tr');
-              });
-          if (els.length > 0) els[0].click();
-      }""")
-      await asyncio.sleep(1.5)
-
-    print("Clicando em Exportar planilha...")
+    # 3. Clicar em 'Exportar planilha' se for menu suspenso
     opcao_exportar = page_pro.locator(
         ':has-text("Exportar planilha"), [role="menuitem"]:has-text("Exportar"),'
-        ' a:has-text("Exportar"), li:has-text("Exportar"), span:has-text("Exportar")'
+        ' a:has-text("Exportar"), li:has-text("Exportar"),'
+        ' span:has-text("Exportar"), button:has-text("Exportar")'
     ).last
-
-    await opcao_exportar.wait_for(state="visible", timeout=15000)
 
     try:
       async with page_pro.expect_download(timeout=35000) as download_info:
@@ -364,10 +357,11 @@ async def processar_cliente(context, page, cliente_info, sheet):
 
       download = await download_info.value
       download_path = await download.path()
-      print(f"Planilha baixada em: {download_path}")
+      print(f"Planilha de NF-e baixada em: {download_path}")
     except Exception as e:
       print(
-          f"Download não gerado para {nome_cliente}: {e}. Assumindo sem notas."
+          f"Download não disparado para {nome_cliente}: {e}. Assumindo sem"
+          " notas."
       )
       download_path = None
 
@@ -382,22 +376,19 @@ async def processar_cliente(context, page, cliente_info, sheet):
 
   await page_pro.close()
 
-  # --- CÁLCULO PRECISO DOS VALORES ---
+  # --- CÁLCULO PRECISO DOS VALORES DA NOTA FISCAL ---
   total_calculado = 0.0
 
   if download_path:
-    print("Analisando planilha baixada...")
+    print("Analisando planilha de notas fiscais...")
     df = carregar_planilha(download_path)
 
     print(f"Total de linhas na planilha: {len(df)}")
-    print(f"Todas as colunas encontradas: {list(df.columns)}")
+    print(f"Colunas encontradas: {list(df.columns)}")
 
-    # 1. Identificar a coluna real do CFOP
     col_cfop = next(
         (c for c in df.columns if "CFOP" in str(c).upper()), "CFOP"
     )
-
-    # 2. Identificar a coluna do Número da Nota
     col_numero = next(
         (
             c
@@ -409,22 +400,19 @@ async def processar_cliente(context, page, cliente_info, sheet):
         "Número da NFe",
     )
 
-    # 3. IDENTIFICAÇÃO CORRETA DA COLUNA DE VALOR TOTAL (Ignorando parcelas)
+    # Identificar a coluna real do Valor Total da Nota
     col_total = None
-    # Prioridade 1: 'Valor total da nota fiscal'
     for c in df.columns:
       c_up = str(c).upper()
       if "VALOR TOTAL" in c_up and ("NOTA" in c_up or "NF" in c_up):
         col_total = c
         break
-    # Prioridade 2: 'Valor total dos produtos'
     if not col_total:
       for c in df.columns:
         c_up = str(c).upper()
         if "VALOR TOTAL" in c_up and "PRODUTO" in c_up:
           col_total = c
           break
-    # Prioridade 3: Qualquer coluna com 'VALOR' e 'NOTA' (sem parcelas nem impostos)
     if not col_total:
       for c in df.columns:
         c_up = str(c).upper()
@@ -438,11 +426,10 @@ async def processar_cliente(context, page, cliente_info, sheet):
             break
 
     print(
-        f"Colunas selecionadas: CFOP='{col_cfop}', Número='{col_numero}',"
+        f"Colunas mapeadas: CFOP='{col_cfop}', Número='{col_numero}',"
         f" ValorTotal='{col_total}'"
     )
 
-    # Filtrar CFOPs com limpeza de pontuação (ex: 5.101 vira 5101)
     if "Fibrart" in nome_cliente:
       cfops_alvo = ["5101", "6101"]
     elif "Afonso" in nome_cliente:
@@ -451,7 +438,6 @@ async def processar_cliente(context, page, cliente_info, sheet):
       cfops_alvo = ["5101"]
 
     if col_cfop in df.columns:
-      # Extrai os primeiros 4 dígitos numéricos de cada CFOP (funciona com 5.101, 5101, etc.)
       cfop_extraido = (
           df[col_cfop]
           .astype(str)
@@ -470,14 +456,12 @@ async def processar_cliente(context, page, cliente_info, sheet):
     else:
       df_filtrado = df
 
-    # Remover duplicadas pelo número da nota
     if col_numero in df_filtrado.columns:
       df_unique = df_filtrado.drop_duplicates(subset=[col_numero])
     else:
       df_unique = df_filtrado
 
     if not df_unique.empty and col_total and col_total in df_unique.columns:
-      # Exibir amostra dos valores para auditoria no log
       amostra_valores = df_unique[col_total].head(5).tolist()
       print(f"Amostra de valores em '{col_total}': {amostra_valores}")
 
