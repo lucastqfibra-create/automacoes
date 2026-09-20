@@ -192,8 +192,8 @@ async def processar_cliente(context, page, cliente_info, sheet):
     except Exception as e:
       print(f"Aviso no filtro de data: {e}")
 
-    # --- CORREÇÃO: Exportação da Planilha de NF-e ---
-    print("Inspecionando botões de ação no cabeçalho...")
+    # --- Exportação da Planilha de NF-e ---
+    print("Inspecionando cabeçalho da página de notas...")
     elementos_cabecalho = await page_pro.evaluate("""() => {
         return Array.from(document.querySelectorAll('button, a, [role="button"], div[title], [aria-label]'))
             .filter(el => {
@@ -212,7 +212,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
     }""")
     print(f"Botões do cabeçalho detectados: {elementos_cabecalho}")
 
-    # 1. Tentar marcar o checkbox "Marcar todas" no cabeçalho da tabela se existir
+    # 1. Marcar checkbox do cabeçalho (selecionar todas as notas)
     try:
       chk_todos = page_pro.locator(
           'th input[type="checkbox"], thead input[type="checkbox"]'
@@ -220,13 +220,14 @@ async def processar_cliente(context, page, cliente_info, sheet):
       if await chk_todos.count() > 0 and await chk_todos.is_visible():
         if not await chk_todos.is_checked():
           await chk_todos.click(force=True)
-          print("Checkbox de selecionar todas as notas marcado com sucesso!")
+          print("Checkbox de selecionar todas as notas marcado!")
           await asyncio.sleep(1)
     except Exception as e:
       print(f"Aviso no checkbox da tabela: {e}")
 
-    # 2. Clicar no botão 'Ações' da barra superior (excluindo linhas de notas da tabela)
-    print("Abrindo menu de exportação (Ações no cabeçalho)...")
+    # 2. Clicar no botão 'Ações' da barra superior (excluindo linhas individuais)
+    print("Abrindo menu de exportação (Ações)...")
+    clicou_menu = False
     btn_acoes_header = (
         page_pro.locator(
             'button:has-text("Ações"), button:has-text("Ações em lote"),'
@@ -243,9 +244,11 @@ async def processar_cliente(context, page, cliente_info, sheet):
       except Exception:
         pass
       await btn_acoes_header.click(force=True)
+      clicou_menu = True
       await asyncio.sleep(1.5)
-    else:
-      # Fallback via JavaScript direto nos elementos do cabeçalho
+
+    if not clicou_menu:
+      # Fallback via JavaScript direto no cabeçalho
       await page_pro.evaluate("""() => {
           const els = Array.from(document.querySelectorAll('button, a, [role="button"]'))
               .filter(el => {
@@ -256,7 +259,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
       }""")
       await asyncio.sleep(1.5)
 
-    # 3. Clicar na opção "Exportar planilha" que aparece no menu suspenso
+    # 3. Clicar na opção Exportar planilha
     print("Clicando na opção Exportar planilha...")
     opcao_exportar = page_pro.locator(
         ':has-text("Exportar planilha"), [role="menuitem"]:has-text("Exportar"),'
@@ -322,19 +325,19 @@ async def processar_cliente(context, page, cliente_info, sheet):
         return 0.0
 
     if df_unique_nfe.empty:
-      total_cfop_5101 = 0.0
+      total_cfop = 0.0
     else:
       df_unique_nfe["Total NF-e Num"] = df_unique_nfe["Total NF-e"].apply(
           parse_money
       )
-      total_cfop_5101 = df_unique_nfe["Total NF-e Num"].sum()
-      if isinstance(total_cfop_5101, str):
-        total_cfop_5101 = 0.0
+      total_cfop = df_unique_nfe["Total NF-e Num"].sum()
+      if isinstance(total_cfop, str):
+        total_cfop = 0.0
   else:
-    total_cfop_5101 = 0.0
+    total_cfop = 0.0
 
   total_formatado = (
-      f"{float(total_cfop_5101):,.2f}"
+      f"{float(total_cfop):,.2f}"
       .replace(",", "X")
       .replace(".", ",")
       .replace("X", ".")
@@ -379,87 +382,89 @@ async def main():
     await page.fill('input[type="email"]', CONTA_AZUL_EMAIL)
     await page.fill('input[type="password"]', CONTA_AZUL_PASSWORD)
     await page.click('text="Entrar"')
-    await page.wait_for_load_state("domcontentloaded")
-    await asyncio.sleep(2)
 
-    # --- Lógica de 2FA Robusta ---
-    if CONTA_AZUL_TOTP_SECRET:
-      try:
-        print("Verificando se o 2FA foi solicitado...")
-        seletor_inputs = (
-            'input:visible:not([type="checkbox"]):not([type="radio"])'
-        )
+    print("Aguardando autenticação...")
 
-        try:
-          await page.wait_for_selector(seletor_inputs, timeout=6000)
-        except Exception:
-          pass
+    # Polling resiliente de até 15 segundos para transição do login / 2FA
+    autenticado = False
+    for _ in range(15):
+      await asyncio.sleep(1)
+      url_atual = page.url
 
-        inputs_2fa = page.locator(seletor_inputs)
-        qtd_inputs = await inputs_2fa.count()
+      # Se já saiu da tela de login e foi para clientes ou dashboard
+      if "login" not in url_atual and "auth" not in url_atual:
+        print(f"Login direto realizado com sucesso! URL: {url_atual}")
+        autenticado = True
+        break
 
-        if qtd_inputs > 0 and ("login" in page.url or "auth" in page.url):
-          print("Tela de 2FA detectada. Gerando código...")
-          import pyotp
-
-          tempo_restante = 30 - (int(time.time()) % 30)
-          if tempo_restante < 5:
-            await asyncio.sleep(tempo_restante + 1)
-
-          secret_limpo = (
-              CONTA_AZUL_TOTP_SECRET.replace(" ", "").strip().upper()
-          )
-          totp = pyotp.TOTP(secret_limpo)
-          codigo_2fa = totp.now()
-          print(f"Código gerado: {codigo_2fa}")
-
-          if qtd_inputs >= 6:
-            for i, digito in enumerate(codigo_2fa):
-              await inputs_2fa.nth(i).fill(digito)
-              await asyncio.sleep(0.05)
-          else:
-            await inputs_2fa.first.click()
-            await page.keyboard.type(codigo_2fa, delay=100)
-
-          await page.keyboard.press("Enter")
-          await asyncio.sleep(1)
-
-          btn_auth = page.locator(
-              'button:has-text("Autenticar"):visible,'
-              ' button:has-text("Confirmar"):visible,'
-              ' button:has-text("Verificar"):visible,'
-              ' button:has-text("Entrar"):visible'
-          ).first
-          if await btn_auth.count() > 0 and await btn_auth.is_visible():
-            try:
-              await btn_auth.click(timeout=3000)
-            except Exception:
-              pass
-
-          await page.wait_for_load_state("domcontentloaded")
-          await asyncio.sleep(3)
-
-        if "login" in page.url:
-          print("ALERTA: Parece que o 2FA não passou! Tirando screenshot...")
-          await page.screenshot(path="erro_2fa_falhou.png", full_page=True)
-          raise RuntimeError(
-              "2FA preenchido, mas não autenticou. Verifique o segredo ou o"
-              " seletor."
-          )
-
-        print("2FA preenchido com sucesso!")
-      except ImportError:
-        print("ERRO FATAL: Biblioteca pyotp não instalada!")
-        raise
-      except Exception as e:
-        print(f"Erro no fluxo do 2FA: {e}")
-        await browser.close()
-        raise e
-    else:
-      print(
-          "Aviso: CONTA_AZUL_TOTP_SECRET não configurado. Se pedir 2FA, vai"
-          " falhar."
+      # Verifica se a tela de 2FA apareceu
+      inputs_visiveis = page.locator(
+          'input:visible:not([type="checkbox"]):not([type="radio"])'
       )
+      count = await inputs_visiveis.count()
+
+      is_2fa = False
+      if count > 0:
+        primeiro_tipo = (
+            await inputs_visiveis.first.get_attribute("type") or ""
+        ).lower()
+        primeiro_nome = (
+            await inputs_visiveis.first.get_attribute("name") or ""
+        ).lower()
+        if primeiro_tipo != "email" and "email" not in primeiro_nome:
+          is_2fa = True
+
+      if is_2fa and CONTA_AZUL_TOTP_SECRET:
+        print("Tela de 2FA detectada! Gerando código TOTP...")
+        import pyotp
+
+        tempo_restante = 30 - (int(time.time()) % 30)
+        if tempo_restante < 5:
+          await asyncio.sleep(tempo_restante + 1)
+
+        secret_limpo = CONTA_AZUL_TOTP_SECRET.replace(" ", "").strip().upper()
+        totp = pyotp.TOTP(secret_limpo)
+        codigo_2fa = totp.now()
+        print(f"Código 2FA gerado: {codigo_2fa}")
+
+        if count >= 6:
+          for i, digito in enumerate(codigo_2fa):
+            await inputs_visiveis.nth(i).fill(digito)
+            await asyncio.sleep(0.05)
+        else:
+          await inputs_visiveis.first.click()
+          await page.keyboard.type(codigo_2fa, delay=100)
+
+        await page.keyboard.press("Enter")
+        await asyncio.sleep(1)
+
+        btn_auth = page.locator(
+            'button:has-text("Autenticar"):visible,'
+            ' button:has-text("Confirmar"):visible,'
+            ' button:has-text("Verificar"):visible,'
+            ' button:has-text("Entrar"):visible'
+        ).first
+        if await btn_auth.count() > 0 and await btn_auth.is_visible():
+          try:
+            await btn_auth.click(timeout=3000)
+          except Exception:
+            pass
+
+        # Aguarda sair da tela de autenticação
+        for _ in range(12):
+          await asyncio.sleep(1)
+          if "login" not in page.url and "auth" not in page.url:
+            autenticado = True
+            break
+        break
+
+    if not autenticado and ("login" in page.url or "auth" in page.url):
+      await page.screenshot(path="erro_login.png", full_page=True)
+      raise RuntimeError(
+          f"Falha na autenticação. A página permaneceu em: {page.url}"
+      )
+
+    print("Autenticação concluída com sucesso!")
 
     for cliente in CLIENTES_ALVO:
       await processar_cliente(context, page, cliente, sheet)
