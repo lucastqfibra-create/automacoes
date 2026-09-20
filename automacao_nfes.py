@@ -33,7 +33,7 @@ CLIENTES_ALVO = [
 
 
 def carregar_planilha(caminho_arquivo):
-  """Carrega a planilha baixada com suporte a .xlsx ou .csv."""
+  """Carrega a planilha (.xlsx, .xls ou .csv) e ajusta o cabeçalho real."""
   with open(caminho_arquivo, "rb") as f:
     cabecalho_bytes = f.read(2048)
 
@@ -95,7 +95,6 @@ async def processar_cliente(context, page, cliente_info, sheet):
   await page.wait_for_load_state("domcontentloaded")
   await asyncio.sleep(3)
 
-  # Espera a lista de clientes carregar do servidor
   try:
     await page.wait_for_selector(
         "table tbody tr, tr[class*='row']", timeout=25000
@@ -147,9 +146,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
   except Exception as e:
     print(f"Erro ao selecionar cliente {nome_cliente}: {e}")
     try:
-      screenshot_path = f"erro_{nome_cliente.replace(' ', '_')}.png"
-      await page.screenshot(path=screenshot_path)
-      print(f"Screenshot de erro salvo em: {screenshot_path}")
+      await page.screenshot(path=f"erro_{nome_cliente.replace(' ', '_')}.png")
     except Exception:
       pass
     return
@@ -160,7 +157,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
     print("Aguardando carregamento da interface do CA Pro...")
     await asyncio.sleep(3)
 
-    # Navegação pelo menu Vendas -> NF-e caso não esteja na tela
+    # Navegar para Vendas -> NF-e caso necessário
     seletor_menu_vendas = (
         '#PRODUCTS, [id*="PRODUCTS"], :has-text("Vendas"),'
         ' :has-text("Produtos")'
@@ -232,45 +229,58 @@ async def processar_cliente(context, page, cliente_info, sheet):
     except Exception as e:
       print(f"Aviso no filtro: {e}")
 
-    # Selecionar todas as notas se houver botão/checkbox
-    try:
-      btn_sel = page_pro.locator(
-          'button:has-text("Selecionar todas"), th input[type="checkbox"],'
-          ' thead input[type="checkbox"]'
-      ).first
+    # 1. Marcar checkbox do cabeçalho da tabela (selecionar todas as notas)
+    print("Selecionando todas as notas da tabela...")
+    chk_todos = page_pro.locator(
+        'th input[type="checkbox"], thead input[type="checkbox"]'
+    ).first
+    if await chk_todos.count() > 0:
+      await chk_todos.click(force=True)
+      print("Checkbox do cabeçalho marcado com sucesso!")
+      await asyncio.sleep(1.5)
+    else:
+      btn_sel = page_pro.locator('button:has-text("Selecionar todas")').first
       if await btn_sel.count() > 0 and await btn_sel.is_visible():
         await btn_sel.click(force=True)
-        await asyncio.sleep(1)
-    except Exception:
-      pass
+        await asyncio.sleep(1.5)
 
-    # Abrir menu de exportação (busca robusta)
-    print("Abrindo menu de exportação (busca robusta)...")
-    for sel in [
-        'button:has-text("Ações em lote")',
-        'button:has-text("Ações")',
-        'button:has-text("Exportar")',
-        '[aria-label*="Ações"]',
-        'div[title="Ações"] button',
-    ]:
-      btn = page_pro.locator(sel).first
-      if await btn.count() > 0 and await btn.is_visible():
-        try:
-          await btn.click(force=True)
-          await asyncio.sleep(1)
-          break
-        except Exception:
-          pass
+    # 2. Clicar no botão 'Ações' do CABEÇALHO (excluindo linhas da tabela)
+    print("Abrindo menu de exportação no cabeçalho...")
+    btn_header = (
+        page_pro.locator(
+            'button:has-text("Ações em lote"), button:has-text("Ações"),'
+            ' button:has-text("Exportar"), [aria-label*="Ações"]'
+        )
+        .filter(has_not=page_pro.locator("tbody tr *"))
+        .first
+    )
 
+    if await btn_header.count() > 0:
+      await btn_header.click(force=True)
+      await asyncio.sleep(1.5)
+    else:
+      # Fallback via JavaScript direto no cabeçalho
+      await page_pro.evaluate("""() => {
+          const els = Array.from(document.querySelectorAll('button, a, [role="button"]'))
+              .filter(el => {
+                  const t = (el.innerText || '').trim();
+                  return (t === 'Ações em lote' || t === 'Ações' || t.includes('Exportar')) && !el.closest('tbody tr');
+              });
+          if (els.length > 0) els[0].click();
+      }""")
+      await asyncio.sleep(1.5)
+
+    # 3. Clicar em 'Exportar planilha'
     print("Clicando em Exportar planilha...")
     opcao_exportar = page_pro.locator(
         ':has-text("Exportar planilha"), [role="menuitem"]:has-text("Exportar"),'
-        ' a:has-text("Exportar"), button:has-text("Exportar")'
+        ' a:has-text("Exportar"), li:has-text("Exportar"),'
+        ' span:has-text("Exportar"), button:has-text("Exportar")'
     ).last
 
     await opcao_exportar.wait_for(state="visible", timeout=15000)
 
-    async with page_pro.expect_download(timeout=35000) as download_info:
+    async with page_pro.expect_download(timeout=45000) as download_info:
       try:
         await opcao_exportar.click(timeout=5000)
       except Exception:
@@ -294,7 +304,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
   # Processamento e Cálculo
   total_calculado = 0.0
   if download_path:
-    print("Processando dados do CSV baixado...")
+    print("Processando dados do arquivo baixado...")
     df = carregar_planilha(download_path)
 
     col_cfop = next(
@@ -490,7 +500,7 @@ async def main():
             except Exception:
               pass
 
-          # Aguarda sair da tela de login sem falso alarme
+          # Aguarda sair da tela de login
           for _ in range(12):
             await asyncio.sleep(1)
             if "login" not in page.url and "auth" not in page.url:
@@ -507,7 +517,7 @@ async def main():
     for cliente in CLIENTES_ALVO:
       await processar_cliente(context, page, cliente, sheet)
 
-    print("\nTodos os clientes foram processados!")
+    print("\nTodos os clientes foram processados com sucesso!")
     await browser.close()
 
 
