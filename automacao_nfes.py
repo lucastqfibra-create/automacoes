@@ -1,13 +1,22 @@
 import asyncio
 import datetime
-import io
 import os
+import subprocess
+import sys
 import time
 from dotenv import load_dotenv
 from google.oauth2.service_account import Credentials
 import gspread
 import pandas as pd
 from playwright.async_api import async_playwright
+
+# Garantir que openpyxl esteja instalado para leitura de .xlsx
+try:
+  import openpyxl
+except ImportError:
+  print("Instalando openpyxl dinamicamente...")
+  subprocess.check_call([sys.executable, "-m", "pip", "install", "openpyxl"])
+  import openpyxl
 
 # Carregar variáveis de ambiente
 load_dotenv()
@@ -25,9 +34,9 @@ CLIENTES_ALVO = [
 
 
 def carregar_planilha(caminho_arquivo):
-  """Carrega a planilha baixada do Conta Azul com suporte a CSV, XLSX e XLS,
+  """Carrega a planilha baixada do Conta Azul (suportando .xlsx, .xls ou .csv)
 
-  detectando automaticamente a linha de cabeçalho real.
+  e ajusta automaticamente o cabeçalho real.
   """
   with open(caminho_arquivo, "rb") as f:
     cabecalho_bytes = f.read(2048)
@@ -36,9 +45,20 @@ def carregar_planilha(caminho_arquivo):
   if cabecalho_bytes.startswith(b"PK\x03\x04"):
     print("Formato detectado: Excel .xlsx")
     try:
-      return pd.read_excel(caminho_arquivo, engine="openpyxl")
+      df = pd.read_excel(caminho_arquivo, engine="openpyxl")
     except Exception:
-      return pd.read_excel(caminho_arquivo)
+      df = pd.read_excel(caminho_arquivo)
+
+    # Verifica se as colunas estão na primeira linha ou se há cabeçalho antes
+    colunas_str = " ".join([str(c).upper() for c in df.columns])
+    if "CFOP" not in colunas_str and "NFE" not in colunas_str:
+      for idx, row in df.head(10).iterrows():
+        row_str = " ".join([str(val).upper() for val in row.values])
+        if "CFOP" in row_str or "NFE" in row_str or "NÚMERO" in row_str:
+          df.columns = df.iloc[idx]
+          df = df.iloc[idx + 1 :].reset_index(drop=True)
+          break
+    return df
 
   # 2. Se for XLS binário antigo
   if cabecalho_bytes.startswith(b"\xd0\xcf\x11\xe0"):
@@ -62,7 +82,6 @@ def carregar_planilha(caminho_arquivo):
       with open(caminho_arquivo, "r", encoding=enc) as f:
         linhas = [f.readline() for _ in range(20)]
 
-      # Descobrir qual linha contém o cabeçalho real das notas
       linha_cabecalho = 0
       for idx, linha in enumerate(linhas):
         l_upper = linha.upper()
@@ -100,7 +119,6 @@ def carregar_planilha(caminho_arquivo):
     except Exception:
       continue
 
-  # Fallback com engine python
   return pd.read_csv(
       caminho_arquivo, sep=None, engine="python", on_bad_lines="skip"
   )
@@ -312,7 +330,6 @@ async def processar_cliente(context, page, cliente_info, sheet):
       await asyncio.sleep(1.5)
 
     if not clicou_menu:
-      # Fallback via JavaScript direto no cabeçalho
       await page_pro.evaluate("""() => {
           const els = Array.from(document.querySelectorAll('button, a, [role="button"]'))
               .filter(el => {
@@ -355,12 +372,12 @@ async def processar_cliente(context, page, cliente_info, sheet):
 
   await page_pro.close()
 
-  # --- Leitura Inteligente dos Dados Baixados ---
+  # --- Leitura e Cálculo dos Dados Baixados ---
   if download_path:
     print("Processando dados do arquivo baixado...")
     df = carregar_planilha(download_path)
 
-    # Identificar nomes das colunas de forma flexível
+    # Identificar colunas dinamicamente
     col_cfop = next(
         (c for c in df.columns if "CFOP" in str(c).upper()), "CFOP"
     )
