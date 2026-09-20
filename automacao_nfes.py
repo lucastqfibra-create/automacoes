@@ -1,7 +1,6 @@
 import asyncio
 import datetime
 import os
-import sys
 import time
 from dotenv import load_dotenv
 from google.oauth2.service_account import Credentials
@@ -32,9 +31,12 @@ async def processar_cliente(context, page, cliente_info, sheet):
 
   # Voltar para a tela de clientes
   print("Acessando lista de clientes no Conta Azul Mais...")
-  await page.goto("https://mais.contaazul.com/#/inicio")
+  await page.goto(
+      "https://mais.contaazul.com/#/inicio",
+      wait_until="domcontentloaded",
+      timeout=60000,
+  )
   await page.wait_for_load_state("networkidle")
-  await asyncio.sleep(2)
 
   try:
     menu_locator = page.locator('text="Meus clientes"').first
@@ -44,15 +46,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
     await page.click('text="Meus clientes"', force=True)
 
   await page.wait_for_load_state("networkidle")
-  await asyncio.sleep(3)
-
-  # Espera a lista carregar para não dar timeout na Fibrart
-  try:
-    await page.wait_for_selector(
-        "table tbody tr, tr[class*='row']", timeout=25000
-    )
-  except Exception:
-    pass
+  await asyncio.sleep(2)
 
   try:
     print(f"Selecionando o cliente {nome_cliente}...")
@@ -113,7 +107,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
     return
 
   download_path = None
-  # Navegando pelo menu Vendas -> NF-e (seu seletor original que funciona)
+  # Navegando pelo menu Vendas -> NF-e
   try:
     vendas_els = page_pro.locator('//*[@id="PRODUCTS"]/div[1]/div')
     for i in range(await vendas_els.count()):
@@ -143,7 +137,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
     if vazio:
       print("Nenhuma nota fiscal encontrada no período inicial.")
 
-    # Configurar filtro "Este mês"
+    # --- NOVO: Forçar o filtro "Este mês" (Puro Playwright) ---
     print("Tentando configurar filtro para 'Este mês'...")
     try:
       meses = [
@@ -164,6 +158,8 @@ async def processar_cliente(context, page, cliente_info, sheet):
       mes_atual_str = f"{meses[hoje.month - 1]} de {hoje.year}"
 
       clicou_dropdown = False
+
+      # Tenta encontrar o botão pelo texto (ex: "Agosto de 2026" ou "Últimos 30 dias")
       for texto in [
           mes_atual_str,
           "Últimos 30 dias",
@@ -179,15 +175,17 @@ async def processar_cliente(context, page, cliente_info, sheet):
           break
 
       if not clicou_dropdown:
+        # Estratégia B: Clicar abaixo de "Período"
         lbl_periodo = page_pro.locator('text="Período"').first
         if await lbl_periodo.count() > 0:
           pass
 
       if clicou_dropdown:
         await asyncio.sleep(1.5)
+        # O menu abriu, agora clica em "Este mês"
         btn_este_mes = page_pro.locator('text="Este mês"').nth(0)
         if await btn_este_mes.count() > 0 and await btn_este_mes.is_visible():
-          await btn_este_mes.click()
+          await btn_este_mes.click()  # Sem force=True para respeitar animações
           print("Filtro alterado para 'Este mês' com sucesso via Playwright!")
         else:
           btn_este_mes_alt = page_pro.locator('text="Este Mês"').nth(0)
@@ -201,7 +199,14 @@ async def processar_cliente(context, page, cliente_info, sheet):
         await page_pro.wait_for_load_state("networkidle")
         await asyncio.sleep(2)
 
+        # Forçar o refresh clicando na Lupa de pesquisa
         try:
+          lupa = (
+              page_pro.locator('button:has(svg), button[type="submit"]')
+              .filter(has_text="")
+              .nth(1)
+          )
+          # Melhor: localizar o botão ao lado do input de pesquisa
           lupa2 = (
               page_pro.locator('input[placeholder*="Pesquisar"]')
               .locator("xpath=..")
@@ -285,88 +290,27 @@ async def processar_cliente(context, page, cliente_info, sheet):
   await page_pro.close()
 
   if download_path:
-    print("Processando dados da planilha baixada...")
-    # Suporte a Excel (.xlsx) e CSV
-    df = None
+    print("Processando dados do CSV baixado...")
     try:
-      with open(download_path, "rb") as f:
-        cabecalho = f.read(4)
-      if cabecalho.startswith(b"PK\x03\x04") or download_path.endswith(".xlsx"):
-        df = pd.read_excel(download_path)
-      else:
-        df = pd.read_csv(download_path, sep=";", encoding="utf-8")
-    except Exception:
-      try:
-        df = pd.read_csv(download_path, sep=";", encoding="latin1")
-      except Exception:
-        df = pd.read_excel(download_path)
+      df = pd.read_csv(download_path, sep=";", encoding="utf-8")
+    except UnicodeDecodeError:
+      df = pd.read_csv(download_path, sep=";", encoding="latin1")
 
-    # Identificar coluna CFOP
-    col_cfop = next((c for c in df.columns if "CFOP" in str(c).upper()), "CFOP")
-
-    # Identificar coluna de número da nota
-    col_numero = next(
-        (
-            c
-            for c in df.columns
-            if "NÚMERO" in str(c).upper()
-            or "NUMERO" in str(c).upper()
-            or "NFE" in str(c).upper()
-        ),
-        "Número da NFe",
-    )
-
-    # Identificar coluna de valor total (priorizando a nota e ignorando parcelas)
-    col_total = None
-    for c in df.columns:
-      c_up = str(c).upper()
-      if "VALOR TOTAL" in c_up and ("NOTA" in c_up or "NF" in c_up):
-        col_total = c
-        break
-    if not col_total:
-      for c in df.columns:
-        c_up = str(c).upper()
-        if "TOTAL" in c_up and not any(
-            b in c_up for b in ["PARCELA", "ICMS", "IPI", "PIS", "COFINS"]
-        ):
-          col_total = c
-          break
-    if not col_total:
-      col_total = "Total NF-e"
-
-    print(
-        f"Colunas utilizadas: CFOP='{col_cfop}', Número='{col_numero}',"
-        f" Total='{col_total}'"
-    )
-
-    # Definir CFOPs aceitos por cliente (com ou sem ponto: 5101 e 5.101)
+    # Definir CFOPs aceitos por cliente
     if "Fibrart" in nome_cliente:
-      cfops_base = ["5101", "6101"]
+      cfops_validos = ["5101", "6101"]
     elif "Afonso" in nome_cliente:
-      cfops_base = ["5102", "6102"]
+      cfops_validos = ["5102", "6102"]
     else:
-      cfops_base = ["5101"]
+      cfops_validos = ["5101"]
 
-    cfops_expandidos = cfops_base + [c[0] + "." + c[1:] for c in cfops_base]
-    padrao_regex = "|".join(cfops_expandidos)
-
-    if col_cfop in df.columns:
-      df_filtrado = df[
-          df[col_cfop].astype(str).str.contains(padrao_regex, na=False)
-      ]
-    else:
-      df_filtrado = df
-
-    if col_numero in df_filtrado.columns:
-      df_unique_nfe = df_filtrado.drop_duplicates(subset=[col_numero])
-    else:
-      df_unique_nfe = df_filtrado
+    padrao_regex = "|".join(cfops_validos)
+    df_filtrado = df[df["CFOP"].str.contains(padrao_regex, na=False)]
+    df_unique_nfe = df_filtrado.drop_duplicates(subset=["Número da NFe"])
 
     def parse_money(valor_str):
       if pd.isna(valor_str):
         return 0.0
-      if isinstance(valor_str, (int, float)):
-        return float(valor_str)
       valor = (
           str(valor_str)
           .replace("R$", "")
@@ -379,20 +323,20 @@ async def processar_cliente(context, page, cliente_info, sheet):
       except ValueError:
         return 0.0
 
-    if df_unique_nfe.empty or col_total not in df_unique_nfe.columns:
-      total_calculado = 0.0
+    if df_unique_nfe.empty:
+      total_cfop_5101 = 0.0
     else:
-      df_unique_nfe["Total NF-e Num"] = df_unique_nfe[col_total].apply(
+      df_unique_nfe["Total NF-e Num"] = df_unique_nfe["Total NF-e"].apply(
           parse_money
       )
-      total_calculado = df_unique_nfe["Total NF-e Num"].sum()
-      if isinstance(total_calculado, str):
-        total_calculado = 0.0
+      total_cfop_5101 = df_unique_nfe["Total NF-e Num"].sum()
+      if isinstance(total_cfop_5101, str):
+        total_cfop_5101 = 0.0
   else:
-    total_calculado = 0.0
+    total_cfop_5101 = 0.0
 
   total_formatado = (
-      f"{float(total_calculado):,.2f}"
+      f"{float(total_cfop_5101):,.2f}"
       .replace(",", "X")
       .replace(".", ",")
       .replace("X", ".")
@@ -431,7 +375,11 @@ async def main():
     page = await context.new_page()
 
     print("Acessando Conta Azul...")
-    await page.goto("https://mais.contaazul.com/#/login")
+    await page.goto(
+        "https://mais.contaazul.com/#/login",
+        wait_until="domcontentloaded",
+        timeout=60000,
+    )
 
     await page.fill('input[type="email"]', CONTA_AZUL_EMAIL)
     await page.fill('input[type="password"]', CONTA_AZUL_PASSWORD)
@@ -439,7 +387,7 @@ async def main():
     await page.wait_for_load_state("networkidle")
     await asyncio.sleep(2)
 
-    # --- Lógica de 2FA com PyOTP resiliente ---
+    # --- Lógica de 2FA com PyOTP ---
     if CONTA_AZUL_TOTP_SECRET:
       try:
         print("Verificando se o 2FA foi solicitado...")
@@ -480,7 +428,7 @@ async def main():
           # Espera a transição de saída do login sem falso alarme
           for _ in range(12):
             await asyncio.sleep(1)
-            if "login" not in page.url and not await btn_auth.is_visible():
+            if "login" not in page.url:
               break
 
           print("2FA preenchido com sucesso!")
@@ -501,7 +449,7 @@ async def main():
     for cliente in CLIENTES_ALVO:
       await processar_cliente(context, page, cliente, sheet)
 
-    print("\nTodos os clientes foram processados com sucesso!")
+    print("\nTodos os clientes foram processados!")
     await browser.close()
 
 
