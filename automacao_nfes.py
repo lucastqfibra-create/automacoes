@@ -203,39 +203,51 @@ async def processar_cliente(context, page, cliente_info, sheet):
   download_path = None
 
   try:
-    print("Aguardando carregamento inicial do CA Pro...")
+    print("Aguardando carregamento da interface do CA Pro...")
+    await page_pro.wait_for_load_state("networkidle")
     await asyncio.sleep(3)
 
-    # NAVEGAÇÃO DIRETA PARA NOTAS FISCAIS DE PRODUTO
-    print("Navegando diretamente para a URL de Notas Fiscais de Produto...")
-    url_base = page_pro.url.split("#")[0]
-    url_nfe = f"{url_base}#/vendas/notas-fiscais-produto"
-    print(f"URL de destino: {url_nfe}")
+    # 1. Navegação no Menu Lateral: Vendas -> Notas Fiscais de Produto
+    print("Navegando pelo menu lateral para Vendas -> NF-e...")
+    chegou_nfe = False
 
-    await page_pro.goto(url_nfe)
-    await page_pro.wait_for_load_state("domcontentloaded")
-    await asyncio.sleep(4)
+    # Localiza o menu Vendas no sidebar
+    menu_vendas = page_pro.locator(
+        '#PRODUCTS, [id*="PRODUCTS"], nav a:has-text("Vendas"),'
+        ' nav div:has-text("Vendas"), aside :has-text("Vendas")'
+    ).first
 
-    # Caso a URL direta não carregue a tela, usa o clique com seletor específico
-    if "notas-fiscais" not in page_pro.url:
-      print("Tentando navegação reforçada pelo menu lateral...")
-      btn_vendas = page_pro.locator(
-          'a:has-text("Vendas"), button:has-text("Vendas"),'
-          ' [data-testid*="sales"], [id*="PRODUCTS"]'
-      ).first
-      if await btn_vendas.count() > 0 and await btn_vendas.is_visible():
-        await btn_vendas.click(force=True)
-        await asyncio.sleep(1.5)
+    if await menu_vendas.count() > 0:
+      try:
+        await menu_vendas.hover()
+        await menu_vendas.click()
+      except Exception:
+        await menu_vendas.click(force=True)
+      await asyncio.sleep(2)
 
-      link_nfe = page_pro.locator(
-          'a[href*="notas-fiscais"], :has-text("Notas fiscais de produto")'
-      ).first
-      if await link_nfe.count() > 0 and await link_nfe.is_visible():
-        await link_nfe.click(force=True)
-        await page_pro.wait_for_load_state("domcontentloaded")
-        await asyncio.sleep(3)
+    # Clica no submenu Notas Fiscais de Produto
+    submenu_nfe = page_pro.locator(
+        '#SALES_CONTROL_PRODUCT_INVOICE, a:has-text("Notas fiscais de'
+        ' produto"), :has-text("Notas fiscais de produto"), a[href*="nota"]'
+    ).first
 
-    print(f"URL atual após navegação: {page_pro.url}")
+    if await submenu_nfe.count() > 0 and await submenu_nfe.is_visible():
+      await submenu_nfe.click(force=True)
+      await page_pro.wait_for_load_state("domcontentloaded")
+      await asyncio.sleep(3)
+      chegou_nfe = True
+    else:
+      # Se o clique não funcionou, tenta navegação direta pela URL do CA Pro
+      url_base = page_pro.url.split("#")[0]
+      print(
+          "Tentando URL direta:"
+          f" {url_base}#/ca/vendas/notas-fiscais-produto..."
+      )
+      await page_pro.goto(f"{url_base}#/ca/vendas/notas-fiscais-produto")
+      await page_pro.wait_for_load_state("domcontentloaded")
+      await asyncio.sleep(3)
+
+    print(f"URL atual na tela: {page_pro.url}")
 
     # Configurar filtro para "Este mês"
     print("Configurando filtro para 'Este mês'...")
@@ -287,7 +299,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
     except Exception as e:
       print(f"Aviso no filtro: {e}")
 
-    # VERIFICAÇÃO PRÉVIA: Ver se há notas emitidas na tabela
+    # Verificar se há notas emitidas na tabela
     linhas_tabela = page_pro.locator(
         'table tbody tr:not([class*="empty"]):not([class*="no-data"])'
     )
@@ -310,7 +322,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
       await page_pro.close()
       return
 
-    # 1. Tentar marcar o checkbox ou botão 'Selecionar todas'
+    # 1. Selecionar todas as notas pelo botão ou checkbox
     try:
       btn_sel_todas = page_pro.locator('button:has-text("Selecionar todas")').first
       if await btn_sel_todas.count() > 0 and await btn_sel_todas.is_visible():
@@ -329,19 +341,23 @@ async def processar_cliente(context, page, cliente_info, sheet):
     except Exception as e:
       print(f"Aviso na seleção: {e}")
 
-    # 2. Clicar no botão 'Ações em lote', 'Ações' ou 'Exportar'
+    # 2. Clicar no botão 'Ações' do cabeçalho da tabela
     print("Abrindo menu de exportação...")
-    btn_exportar = page_pro.locator(
-        'button:has-text("Exportar"):visible,'
-        ' button:has-text("Ações em lote"):visible,'
-        ' button:has-text("Ações"):visible'
-    ).filter(has_not=page_pro.locator("tbody tr *"))
+    btn_acoes = (
+        page_pro.locator(
+            'button:has-text("Ações em lote"):visible,'
+            ' button:has-text("Ações"):visible,'
+            ' button:has-text("Exportar"):visible'
+        )
+        .filter(has_not=page_pro.locator("tbody tr *"))
+        .first
+    )
 
-    if await btn_exportar.count() > 0:
-      await btn_exportar.first.click(force=True)
+    if await btn_acoes.count() > 0:
+      await btn_acoes.click(force=True)
       await asyncio.sleep(1.5)
 
-    # 3. Clicar em 'Exportar planilha' se for menu suspenso
+    # 3. Clicar na opção 'Exportar planilha'
     opcao_exportar = page_pro.locator(
         ':has-text("Exportar planilha"), [role="menuitem"]:has-text("Exportar"),'
         ' a:has-text("Exportar"), li:has-text("Exportar"),'
@@ -359,10 +375,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
       download_path = await download.path()
       print(f"Planilha de NF-e baixada em: {download_path}")
     except Exception as e:
-      print(
-          f"Download não disparado para {nome_cliente}: {e}. Assumindo sem"
-          " notas."
-      )
+      print(f"Download não disparado para {nome_cliente}: {e}")
       download_path = None
 
   except Exception as e:
@@ -376,7 +389,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
 
   await page_pro.close()
 
-  # --- CÁLCULO PRECISO DOS VALORES DA NOTA FISCAL ---
+  # --- CÁLCULO DOS VALORES DAS NOTAS FISCAIS ---
   total_calculado = 0.0
 
   if download_path:
@@ -400,7 +413,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
         "Número da NFe",
     )
 
-    # Identificar a coluna real do Valor Total da Nota
+    # Localizar a coluna do Valor Total da Nota
     col_total = None
     for c in df.columns:
       c_up = str(c).upper()
@@ -438,6 +451,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
       cfops_alvo = ["5101"]
 
     if col_cfop in df.columns:
+      # Normaliza o CFOP extraindo os 4 dígitos principais (funciona com 5.101 e 5101)
       cfop_extraido = (
           df[col_cfop]
           .astype(str)
@@ -450,7 +464,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
 
       df_filtrado = df[cfop_extraido.isin(cfops_alvo)]
       print(
-          f"Notas que atendem aos CFOPs {cfops_alvo}: {len(df_filtrado)} de"
+          f"Notas com CFOPs {cfops_alvo}: {len(df_filtrado)} de"
           f" {len(df)}"
       )
     else:
