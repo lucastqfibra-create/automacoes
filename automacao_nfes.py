@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import os
+import re
 import subprocess
 import sys
 import time
@@ -10,7 +11,7 @@ import gspread
 import pandas as pd
 from playwright.async_api import async_playwright
 
-# Garantir que openpyxl esteja instalado para leitura de .xlsx
+# Garantir openpyxl instalado
 try:
   import openpyxl
 except ImportError:
@@ -18,7 +19,6 @@ except ImportError:
   subprocess.check_call([sys.executable, "-m", "pip", "install", "openpyxl"])
   import openpyxl
 
-# Carregar variáveis de ambiente
 load_dotenv()
 
 CONTA_AZUL_EMAIL = os.getenv("CONTA_AZUL_EMAIL")
@@ -34,14 +34,10 @@ CLIENTES_ALVO = [
 
 
 def carregar_planilha(caminho_arquivo):
-  """Carrega a planilha baixada do Conta Azul (suportando .xlsx, .xls ou .csv)
-
-  e ajusta automaticamente o cabeçalho real.
-  """
+  """Carrega a planilha (.xlsx, .xls ou .csv) e ajusta o cabeçalho real."""
   with open(caminho_arquivo, "rb") as f:
     cabecalho_bytes = f.read(2048)
 
-  # 1. Se for XLSX (ZIP container: PK\x03\x04)
   if cabecalho_bytes.startswith(b"PK\x03\x04"):
     print("Formato detectado: Excel .xlsx")
     try:
@@ -49,7 +45,6 @@ def carregar_planilha(caminho_arquivo):
     except Exception:
       df = pd.read_excel(caminho_arquivo)
 
-    # Verifica se as colunas estão na primeira linha ou se há cabeçalho antes
     colunas_str = " ".join([str(c).upper() for c in df.columns])
     if "CFOP" not in colunas_str and "NFE" not in colunas_str:
       for idx, row in df.head(10).iterrows():
@@ -60,7 +55,6 @@ def carregar_planilha(caminho_arquivo):
           break
     return df
 
-  # 2. Se for XLS binário antigo
   if cabecalho_bytes.startswith(b"\xd0\xcf\x11\xe0"):
     print("Formato detectado: Excel .xls binário")
     try:
@@ -68,14 +62,12 @@ def carregar_planilha(caminho_arquivo):
     except Exception:
       pass
 
-  # 3. Se for tabela HTML
   if b"<html" in cabecalho_bytes.lower() or b"<table" in cabecalho_bytes.lower():
     print("Formato detectado: Tabela HTML")
     dfs = pd.read_html(caminho_arquivo)
     if dfs:
       return dfs[0]
 
-  # 4. Tratar como CSV / Texto com cabeçalho variável
   print("Processando arquivo como CSV/Texto...")
   for enc in ["utf-8", "latin1", "cp1252"]:
     try:
@@ -109,10 +101,6 @@ def carregar_planilha(caminho_arquivo):
               or "NFE" in colunas_str
               or "NUMERO" in colunas_str
           ):
-            print(
-                f"CSV lido com sucesso! (sep='{sep}', skiprows={linha_cabecalho},"
-                f" encoding='{enc}')"
-            )
             return df
         except Exception:
           continue
@@ -124,11 +112,28 @@ def carregar_planilha(caminho_arquivo):
   )
 
 
+def parse_money(valor):
+  """Converte valores monetários para float de forma segura."""
+  if pd.isna(valor):
+    return 0.0
+  if isinstance(valor, (int, float)):
+    return float(valor)
+  valor_str = str(valor).replace("R$", "").replace(" ", "").strip()
+  if "," in valor_str:
+    valor_str = valor_str.replace(".", "").replace(",", ".")
+  try:
+    return float(valor_str)
+  except ValueError:
+    return 0.0
+
+
 async def processar_cliente(context, page, cliente_info, sheet):
   nome_cliente = cliente_info["nome"]
   celula_alvo = cliente_info["celula"]
 
-  print(f"\n--- Iniciando processamento para: {nome_cliente} ---")
+  print(f"\n==========================================")
+  print(f"Iniciando processamento para: {nome_cliente}")
+  print(f"==========================================")
 
   print("Acessando lista de clientes no Conta Azul Mais...")
   await page.goto("https://mais.contaazul.com/#/clientes")
@@ -145,7 +150,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
       await menu_meus_clientes.dispatch_event("click")
       await page.wait_for_load_state("domcontentloaded")
   except Exception as e:
-    print(f"Tentativa de navegação pelo menu: {e}")
+    print(f"Aviso menu: {e}")
 
   try:
     print(f"Selecionando o cliente {nome_cliente}...")
@@ -154,7 +159,6 @@ async def processar_cliente(context, page, cliente_info, sheet):
     await client_row.click(force=True)
     await asyncio.sleep(2)
 
-    # Clicar em Acessar CA Pro
     print("Clicando em Acessar CA Pro...")
     btn_pro = page.locator('button:has-text("Acessar CA Pro")').first
     await btn_pro.wait_for(state="visible", timeout=20000)
@@ -177,7 +181,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
 
       page_pro = await page_promise
     except Exception as e:
-      print(f"Aviso no clique do CA Pro: {e}")
+      print(f"Aviso clique CA Pro: {e}")
 
     if not page_pro:
       await page.screenshot(
@@ -192,18 +196,15 @@ async def processar_cliente(context, page, cliente_info, sheet):
   except Exception as e:
     print(f"Erro ao selecionar cliente {nome_cliente}: {e}")
     try:
-      screenshot_path = f"erro_{nome_cliente.replace(' ', '_')}.png"
-      await page.screenshot(path=screenshot_path)
-      print(f"Screenshot de erro salvo em: {screenshot_path}")
+      await page.screenshot(path=f"erro_{nome_cliente.replace(' ', '_')}.png")
     except Exception:
       pass
     return
 
   download_path = None
 
-  # --- Navegação para Vendas -> NF-e ---
   try:
-    print("Aguardando carregamento da interface do CA Pro...")
+    print("Aguardando interface do CA Pro...")
     seletor_menu_vendas = (
         '#PRODUCTS, [id*="PRODUCTS"], :has-text("Vendas"),'
         ' :has-text("Produtos")'
@@ -212,7 +213,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
     await menu_vendas.wait_for(state="visible", timeout=25000)
     await asyncio.sleep(1)
 
-    print("Navegando pelo menu Vendas -> NF-e...")
+    print("Navegando para Vendas -> NF-e...")
     await menu_vendas.click(force=True)
     await asyncio.sleep(1.5)
 
@@ -223,12 +224,12 @@ async def processar_cliente(context, page, cliente_info, sheet):
     menu_nfe = page_pro.locator(seletor_menu_nfe).first
     await menu_nfe.wait_for(state="visible", timeout=15000)
     await menu_nfe.click(force=True)
-    print("Acessou a tela de Notas Fiscais de Produto!")
+    print("Acessou tela de Notas Fiscais!")
 
     await page_pro.wait_for_load_state("domcontentloaded")
     await asyncio.sleep(4)
 
-    # --- Configurar filtro para "Este mês" ---
+    # Configurar filtro para "Este mês"
     print("Configurando filtro para 'Este mês'...")
     try:
       meses = [
@@ -271,30 +272,37 @@ async def processar_cliente(context, page, cliente_info, sheet):
         ).first
         if await btn_este_mes.count() > 0 and await btn_este_mes.is_visible():
           await btn_este_mes.click()
-          print("Filtro alterado para 'Este mês' com sucesso!")
+          print("Filtro alterado para 'Este mês'!")
 
       await page_pro.wait_for_load_state("domcontentloaded")
       await asyncio.sleep(3)
-
-      try:
-        lupa2 = (
-            page_pro.locator('input[placeholder*="Pesquisar"]')
-            .locator("xpath=..")
-            .locator("button")
-            .first
-        )
-        if await lupa2.count() > 0 and await lupa2.is_visible():
-          await lupa2.click()
-          await page_pro.wait_for_load_state("domcontentloaded")
-          await asyncio.sleep(3)
-      except Exception:
-        pass
-
     except Exception as e:
-      print(f"Aviso no filtro de data: {e}")
+      print(f"Aviso no filtro: {e}")
 
-    # --- Exportação da Planilha de NF-e ---
-    # 1. Marcar checkbox do cabeçalho da tabela (selecionar todas as notas)
+    # VERIFICAÇÃO PRÉVIA: Ver se há notas emitidas na tabela
+    linhas_tabela = page_pro.locator(
+        'table tbody tr:not([class*="empty"]):not([class*="no-data"])'
+    )
+    qtd_linhas = await linhas_tabela.count()
+    texto_pagina = await page_pro.content()
+
+    if (
+        qtd_linhas == 0
+        or "Nenhum registro" in texto_pagina
+        or "Nenhuma nota" in texto_pagina
+    ):
+      print(
+          f"Nenhuma nota fiscal emitida para {nome_cliente} neste período."
+          " Definindo R$ 0,00 na planilha..."
+      )
+      sheet.update_acell(celula_alvo, "0,00")
+      print(
+          f"Planilha atualizada com sucesso na célula {celula_alvo}: R$ 0,00"
+      )
+      await page_pro.close()
+      return
+
+    # Marcar checkbox para selecionar todas as notas
     try:
       chk_todos = page_pro.locator(
           'th input[type="checkbox"], thead input[type="checkbox"]'
@@ -302,19 +310,18 @@ async def processar_cliente(context, page, cliente_info, sheet):
       if await chk_todos.count() > 0 and await chk_todos.is_visible():
         if not await chk_todos.is_checked():
           await chk_todos.click(force=True)
-          print("Checkbox de selecionar todas as notas marcado com sucesso!")
+          print("Checkbox de selecionar todas as notas marcado!")
           await asyncio.sleep(1)
     except Exception as e:
-      print(f"Aviso no checkbox da tabela: {e}")
+      print(f"Aviso no checkbox: {e}")
 
-    # 2. Clicar no botão 'Ações' da barra superior (excluindo linhas de notas)
-    print("Abrindo menu de exportação (Ações no cabeçalho)...")
+    # Clicar no botão 'Ações' do cabeçalho
+    print("Abrindo menu Ações do cabeçalho...")
     clicou_menu = False
     btn_acoes_header = (
         page_pro.locator(
             'button:has-text("Ações"), button:has-text("Ações em lote"),'
-            ' [aria-label*="Ações"], div[title="Ações"] button,'
-            ' button:has-text("Exportar")'
+            ' [aria-label*="Ações"], div[title="Ações"] button'
         )
         .filter(has_not=page_pro.locator("tbody tr *"))
         .first
@@ -340,8 +347,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
       }""")
       await asyncio.sleep(1.5)
 
-    # 3. Clicar na opção Exportar planilha
-    print("Clicando na opção Exportar planilha...")
+    print("Clicando em Exportar planilha...")
     opcao_exportar = page_pro.locator(
         ':has-text("Exportar planilha"), [role="menuitem"]:has-text("Exportar"),'
         ' a:has-text("Exportar"), li:has-text("Exportar"), span:has-text("Exportar")'
@@ -349,22 +355,26 @@ async def processar_cliente(context, page, cliente_info, sheet):
 
     await opcao_exportar.wait_for(state="visible", timeout=15000)
 
-    async with page_pro.expect_download(timeout=45000) as download_info:
-      try:
-        await opcao_exportar.click(timeout=5000)
-      except Exception:
-        await opcao_exportar.evaluate("el => el.click()")
+    try:
+      async with page_pro.expect_download(timeout=35000) as download_info:
+        try:
+          await opcao_exportar.click(timeout=5000)
+        except Exception:
+          await opcao_exportar.evaluate("el => el.click()")
 
-    download = await download_info.value
-    download_path = await download.path()
-    print(f"Planilha baixada em: {download_path}")
+      download = await download_info.value
+      download_path = await download.path()
+      print(f"Planilha baixada em: {download_path}")
+    except Exception as e:
+      print(
+          f"Download não gerado para {nome_cliente}: {e}. Assumindo sem notas."
+      )
+      download_path = None
 
   except Exception as e:
-    print(f"Erro durante a navegação na Conta Azul ({nome_cliente}): {e}")
+    print(f"Erro na navegação ({nome_cliente}): {e}")
     try:
-      screenshot_path = f"erro_{nome_cliente.replace(' ', '_')}.png"
-      await page_pro.screenshot(path=screenshot_path)
-      print(f"Screenshot de erro salvo em: {screenshot_path}")
+      await page_pro.screenshot(path=f"erro_{nome_cliente.replace(' ', '_')}.png")
     except Exception:
       pass
     await page_pro.close()
@@ -372,15 +382,22 @@ async def processar_cliente(context, page, cliente_info, sheet):
 
   await page_pro.close()
 
-  # --- Leitura e Cálculo dos Dados Baixados ---
+  # --- CÁLCULO PRECISO DOS VALORES ---
+  total_calculado = 0.0
+
   if download_path:
-    print("Processando dados do arquivo baixado...")
+    print("Analisando planilha baixada...")
     df = carregar_planilha(download_path)
 
-    # Identificar colunas dinamicamente
+    print(f"Total de linhas na planilha: {len(df)}")
+    print(f"Todas as colunas encontradas: {list(df.columns)}")
+
+    # 1. Identificar a coluna real do CFOP
     col_cfop = next(
         (c for c in df.columns if "CFOP" in str(c).upper()), "CFOP"
     )
+
+    # 2. Identificar a coluna do Número da Nota
     col_numero = next(
         (
             c
@@ -391,74 +408,89 @@ async def processar_cliente(context, page, cliente_info, sheet):
         ),
         "Número da NFe",
     )
-    col_total = next(
-        (
-            c
-            for c in df.columns
-            if "TOTAL" in str(c).upper() or "VALOR" in str(c).upper()
-        ),
-        "Total NF-e",
-    )
+
+    # 3. IDENTIFICAÇÃO CORRETA DA COLUNA DE VALOR TOTAL (Ignorando parcelas)
+    col_total = None
+    # Prioridade 1: 'Valor total da nota fiscal'
+    for c in df.columns:
+      c_up = str(c).upper()
+      if "VALOR TOTAL" in c_up and ("NOTA" in c_up or "NF" in c_up):
+        col_total = c
+        break
+    # Prioridade 2: 'Valor total dos produtos'
+    if not col_total:
+      for c in df.columns:
+        c_up = str(c).upper()
+        if "VALOR TOTAL" in c_up and "PRODUTO" in c_up:
+          col_total = c
+          break
+    # Prioridade 3: Qualquer coluna com 'VALOR' e 'NOTA' (sem parcelas nem impostos)
+    if not col_total:
+      for c in df.columns:
+        c_up = str(c).upper()
+        if ("TOTAL" in c_up or "VALOR" in c_up) and (
+            "NOTA" in c_up or "NF" in c_up
+        ):
+          if not any(
+              bad in c_up for bad in ["PARCELA", "ICMS", "IPI", "PIS", "COFINS"]
+          ):
+            col_total = c
+            break
 
     print(
-        f"Colunas mapeadas: CFOP='{col_cfop}', Número='{col_numero}',"
-        f" Total='{col_total}'"
+        f"Colunas selecionadas: CFOP='{col_cfop}', Número='{col_numero}',"
+        f" ValorTotal='{col_total}'"
     )
 
+    # Filtrar CFOPs com limpeza de pontuação (ex: 5.101 vira 5101)
     if "Fibrart" in nome_cliente:
-      cfops_validos = ["5101", "6101"]
+      cfops_alvo = ["5101", "6101"]
     elif "Afonso" in nome_cliente:
-      cfops_validos = ["5102", "6102"]
+      cfops_alvo = ["5102", "6102"]
     else:
-      cfops_validos = ["5101"]
-
-    padrao_regex = "|".join(cfops_validos)
+      cfops_alvo = ["5101"]
 
     if col_cfop in df.columns:
-      df[col_cfop] = df[col_cfop].astype(str)
-      df_filtrado = df[df[col_cfop].str.contains(padrao_regex, na=False)]
+      # Extrai os primeiros 4 dígitos numéricos de cada CFOP (funciona com 5.101, 5101, etc.)
+      cfop_extraido = (
+          df[col_cfop]
+          .astype(str)
+          .str.replace(".", "", regex=False)
+          .str.extract(r"(\d{4})")[0]
+      )
+      print(
+          f"CFOPs encontrados na planilha: {cfop_extraido.dropna().unique().tolist()}"
+      )
+
+      df_filtrado = df[cfop_extraido.isin(cfops_alvo)]
+      print(
+          f"Notas que atendem aos CFOPs {cfops_alvo}: {len(df_filtrado)} de"
+          f" {len(df)}"
+      )
     else:
       df_filtrado = df
 
+    # Remover duplicadas pelo número da nota
     if col_numero in df_filtrado.columns:
-      df_unique_nfe = df_filtrado.drop_duplicates(subset=[col_numero])
+      df_unique = df_filtrado.drop_duplicates(subset=[col_numero])
     else:
-      df_unique_nfe = df_filtrado
+      df_unique = df_filtrado
 
-    def parse_money(valor_str):
-      if pd.isna(valor_str):
-        return 0.0
-      valor = (
-          str(valor_str)
-          .replace("R$", "")
-          .replace(".", "")
-          .replace(",", ".")
-          .strip()
-      )
-      try:
-        return float(valor)
-      except ValueError:
-        return 0.0
+    if not df_unique.empty and col_total and col_total in df_unique.columns:
+      # Exibir amostra dos valores para auditoria no log
+      amostra_valores = df_unique[col_total].head(5).tolist()
+      print(f"Amostra de valores em '{col_total}': {amostra_valores}")
 
-    if df_unique_nfe.empty or col_total not in df_unique_nfe.columns:
-      total_cfop = 0.0
-    else:
-      df_unique_nfe["Total NF-e Num"] = df_unique_nfe[col_total].apply(
-          parse_money
-      )
-      total_cfop = df_unique_nfe["Total NF-e Num"].sum()
-      if isinstance(total_cfop, str):
-        total_cfop = 0.0
-  else:
-    total_cfop = 0.0
+      df_unique["Valor_Numerico"] = df_unique[col_total].apply(parse_money)
+      total_calculado = df_unique["Valor_Numerico"].sum()
 
   total_formatado = (
-      f"{float(total_cfop):,.2f}"
+      f"{float(total_calculado):,.2f}"
       .replace(",", "X")
       .replace(".", ",")
       .replace("X", ".")
   )
-  print(f"Total Calculado para {nome_cliente}: R$ {total_formatado}")
+  print(f"\n>>> TOTAL FINAL CALCULADO PARA {nome_cliente}: R$ {total_formatado}")
 
   print(f"Atualizando Google Sheets (Célula {celula_alvo})...")
   try:
@@ -500,14 +532,13 @@ async def main():
     await page.click('text="Entrar"')
 
     print("Aguardando autenticação...")
-
     autenticado = False
     for _ in range(15):
       await asyncio.sleep(1)
       url_atual = page.url
 
       if "login" not in url_atual and "auth" not in url_atual:
-        print(f"Login direto realizado com sucesso! URL: {url_atual}")
+        print(f"Login direto realizado! URL: {url_atual}")
         autenticado = True
         break
 
