@@ -53,7 +53,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
     await client_row.click(force=True)
     await asyncio.sleep(2)
 
-    # Clicar em Acessar CA Pro de forma direta
+    # Clicar em Acessar CA Pro
     print("Clicando em Acessar CA Pro...")
     btn_pro = page.locator('button:has-text("Acessar CA Pro")').first
     await btn_pro.wait_for(state="visible", timeout=20000)
@@ -127,7 +127,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
     await page_pro.wait_for_load_state("domcontentloaded")
     await asyncio.sleep(4)
 
-    # --- Configurar filtro para "Este mês" se disponível ---
+    # --- Configurar filtro para "Este mês" ---
     print("Configurando filtro para 'Este mês'...")
     try:
       meses = [
@@ -175,7 +175,6 @@ async def processar_cliente(context, page, cliente_info, sheet):
       await page_pro.wait_for_load_state("domcontentloaded")
       await asyncio.sleep(3)
 
-      # Refresh opcional na busca
       try:
         lupa2 = (
             page_pro.locator('input[placeholder*="Pesquisar"]')
@@ -193,53 +192,77 @@ async def processar_cliente(context, page, cliente_info, sheet):
     except Exception as e:
       print(f"Aviso no filtro de data: {e}")
 
-    # --- CORREÇÃO: Abertura do Split Button de Ações ---
-    print("Abrindo menu de exportação (Ações)...")
-    menu_aberto = False
+    # --- CORREÇÃO: Exportação da Planilha de NF-e ---
+    print("Inspecionando botões de ação no cabeçalho...")
+    elementos_cabecalho = await page_pro.evaluate("""() => {
+        return Array.from(document.querySelectorAll('button, a, [role="button"], div[title], [aria-label]'))
+            .filter(el => {
+                const rect = el.getBoundingClientRect();
+                const isHeader = rect.top < 450 && rect.height > 5 && rect.width > 5;
+                const insideRow = el.closest('tbody tr');
+                return isHeader && !insideRow;
+            })
+            .map(el => ({
+                tag: el.tagName,
+                text: (el.innerText || el.textContent || '').trim().substring(0, 35),
+                title: el.getAttribute('title') || '',
+                className: el.className ? el.className.toString() : ''
+            }))
+            .filter(x => x.text || x.title);
+    }""")
+    print(f"Botões do cabeçalho detectados: {elementos_cabecalho}")
 
-    # Lista de seletores focando na setinha (trigger) do split button
-    seletores_gatilho_acoes = [
-        (  # Gatilho da setinha do split button (padrão Conta Azul)
-            'div[title="Ações"]'
-            " .ds-split-button-wrapper-group__trigger button"
-        ),
-        (
-            '.ds-split-button-wrapper-group__trigger button'
-        ),  # Trigger direto da classe
-        (
-            'div[title="Ações"] button:last-child'
-        ),  # O segundo botão é a setinha
-        'div[title="Ações"] button',  # Qualquer botão do container Ações
-        'button:has-text("Ações")',  # Botão Ações com texto
-        '[aria-label*="Ações"]',  # Botão com aria-label
-    ]
+    # 1. Tentar marcar o checkbox "Marcar todas" no cabeçalho da tabela se existir
+    try:
+      chk_todos = page_pro.locator(
+          'th input[type="checkbox"], thead input[type="checkbox"]'
+      ).first
+      if await chk_todos.count() > 0 and await chk_todos.is_visible():
+        if not await chk_todos.is_checked():
+          await chk_todos.click(force=True)
+          print("Checkbox de selecionar todas as notas marcado com sucesso!")
+          await asyncio.sleep(1)
+    except Exception as e:
+      print(f"Aviso no checkbox da tabela: {e}")
 
-    for sel in seletores_gatilho_acoes:
-      gatilhos = page_pro.locator(sel)
-      total = await gatilhos.count()
-      for idx in range(total):
-        btn = gatilhos.nth(idx)
-        if await btn.is_visible():
-          try:
-            await btn.click(force=True)
-            await asyncio.sleep(1)
+    # 2. Clicar no botão 'Ações' da barra superior (excluindo linhas de notas da tabela)
+    print("Abrindo menu de exportação (Ações no cabeçalho)...")
+    btn_acoes_header = (
+        page_pro.locator(
+            'button:has-text("Ações"), button:has-text("Ações em lote"),'
+            ' [aria-label*="Ações"], div[title="Ações"] button,'
+            ' button:has-text("Exportar")'
+        )
+        .filter(has_not=page_pro.locator("tbody tr *"))
+        .first
+    )
 
-            # Verifica se a opção de exportar apareceu no DOM
-            opt = page_pro.locator(':has-text("Exportar planilha")').first
-            if await opt.count() > 0 and await opt.is_visible():
-              print(f"Menu de exportação aberto com sucesso via: {sel}")
-              menu_aberto = True
-              break
-          except Exception:
-            pass
-      if menu_aberto:
-        break
+    if await btn_acoes_header.count() > 0 and await btn_acoes_header.is_visible():
+      try:
+        await btn_acoes_header.hover()
+      except Exception:
+        pass
+      await btn_acoes_header.click(force=True)
+      await asyncio.sleep(1.5)
+    else:
+      # Fallback via JavaScript direto nos elementos do cabeçalho
+      await page_pro.evaluate("""() => {
+          const els = Array.from(document.querySelectorAll('button, a, [role="button"]'))
+              .filter(el => {
+                  const t = (el.innerText || '').trim();
+                  return (t === 'Ações' || t === 'Ações em lote' || t.includes('Exportar')) && !el.closest('tbody tr');
+              });
+          if (els.length > 0) els[0].click();
+      }""")
+      await asyncio.sleep(1.5)
 
+    # 3. Clicar na opção "Exportar planilha" que aparece no menu suspenso
     print("Clicando na opção Exportar planilha...")
     opcao_exportar = page_pro.locator(
         ':has-text("Exportar planilha"), [role="menuitem"]:has-text("Exportar"),'
-        ' a:has-text("Exportar"), li:has-text("Exportar")'
-    ).first
+        ' a:has-text("Exportar"), li:has-text("Exportar"), span:has-text("Exportar")'
+    ).last
+
     await opcao_exportar.wait_for(state="visible", timeout=15000)
 
     async with page_pro.expect_download(timeout=45000) as download_info:
