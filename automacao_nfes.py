@@ -1,7 +1,6 @@
 import asyncio
 import datetime
 import os
-import subprocess
 import sys
 import time
 from dotenv import load_dotenv
@@ -10,14 +9,7 @@ import gspread
 import pandas as pd
 from playwright.async_api import async_playwright
 
-# Garantir openpyxl instalado
-try:
-  import openpyxl
-except ImportError:
-  print("Instalando openpyxl dinamicamente...")
-  subprocess.check_call([sys.executable, "-m", "pip", "install", "openpyxl"])
-  import openpyxl
-
+# Carregar variáveis de ambiente
 load_dotenv()
 
 CONTA_AZUL_EMAIL = os.getenv("CONTA_AZUL_EMAIL")
@@ -32,72 +24,29 @@ CLIENTES_ALVO = [
 ]
 
 
-def carregar_planilha(caminho_arquivo):
-  """Carrega a planilha (.xlsx, .xls ou .csv) e ajusta o cabeçalho real."""
-  with open(caminho_arquivo, "rb") as f:
-    cabecalho_bytes = f.read(2048)
-
-  if cabecalho_bytes.startswith(b"PK\x03\x04"):
-    try:
-      df = pd.read_excel(caminho_arquivo, engine="openpyxl")
-    except Exception:
-      df = pd.read_excel(caminho_arquivo)
-
-    colunas_str = " ".join([str(c).upper() for c in df.columns])
-    if "CFOP" not in colunas_str and "NFE" not in colunas_str:
-      for idx, row in df.head(10).iterrows():
-        row_str = " ".join([str(val).upper() for val in row.values])
-        if "CFOP" in row_str or "NFE" in row_str or "NÚMERO" in row_str:
-          df.columns = df.iloc[idx]
-          df = df.iloc[idx + 1 :].reset_index(drop=True)
-          break
-    return df
-
-  for enc in ["utf-8", "latin1", "cp1252"]:
-    for sep in [";", ",", "\t"]:
-      try:
-        df = pd.read_csv(
-            caminho_arquivo, sep=sep, encoding=enc, on_bad_lines="skip"
-        )
-        if len(df.columns) > 3:
-          return df
-      except Exception:
-        continue
-
-  return pd.read_csv(
-      caminho_arquivo, sep=None, engine="python", on_bad_lines="skip"
-  )
-
-
-def parse_money(valor):
-  """Converte valores monetários para float de forma segura."""
-  if pd.isna(valor):
-    return 0.0
-  if isinstance(valor, (int, float)):
-    return float(valor)
-  valor_str = str(valor).replace("R$", "").replace(" ", "").strip()
-  if "," in valor_str:
-    valor_str = valor_str.replace(".", "").replace(",", ".")
-  try:
-    return float(valor_str)
-  except ValueError:
-    return 0.0
-
-
 async def processar_cliente(context, page, cliente_info, sheet):
   nome_cliente = cliente_info["nome"]
   celula_alvo = cliente_info["celula"]
 
-  print(f"\n==========================================")
-  print(f"Iniciando processamento para: {nome_cliente}")
-  print(f"==========================================")
+  print(f"\n--- Iniciando processamento para: {nome_cliente} ---")
 
+  # Voltar para a tela de clientes
   print("Acessando lista de clientes no Conta Azul Mais...")
-  await page.goto("https://mais.contaazul.com/#/clientes")
-  await page.wait_for_load_state("domcontentloaded")
+  await page.goto("https://mais.contaazul.com/#/inicio")
+  await page.wait_for_load_state("networkidle")
+  await asyncio.sleep(2)
+
+  try:
+    menu_locator = page.locator('text="Meus clientes"').first
+    await menu_locator.evaluate("el => el.click()")
+  except Exception as e:
+    print("Tentando fallback de clique em Meus Clientes...")
+    await page.click('text="Meus clientes"', force=True)
+
+  await page.wait_for_load_state("networkidle")
   await asyncio.sleep(3)
 
-  # Espera as linhas da tabela de clientes carregarem
+  # Espera a lista carregar para não dar timeout na Fibrart
   try:
     await page.wait_for_selector(
         "table tbody tr, tr[class*='row']", timeout=25000
@@ -112,81 +61,90 @@ async def processar_cliente(context, page, cliente_info, sheet):
     await client_row.click(force=True)
     await asyncio.sleep(2)
 
-    print("Clicando em Acessar CA Pro...")
-    btn_pro = page.locator('button:has-text("Acessar CA Pro")').first
-    await btn_pro.wait_for(state="visible", timeout=20000)
-
+    # Clicar em Acessar CA Pro que está visível
+    btn_pro_els = page.locator('text="Acessar CA Pro"')
     page_pro = None
-    try:
-      page_promise = asyncio.create_task(
-          context.wait_for_event("page", timeout=20000)
-      )
-      await btn_pro.click(force=True)
-      await asyncio.sleep(2)
+    for i in range(await btn_pro_els.count()):
+      if await btn_pro_els.nth(i).is_visible():
+        try:
+          # Inicia a escuta pelo evento da nova aba em background
+          page_promise = asyncio.create_task(
+              context.wait_for_event("page", timeout=15000)
+          )
 
-      modal_confirmar = page.locator('button:has-text("Confirmar")').first
-      if (
-          await modal_confirmar.count() > 0
-          and await modal_confirmar.is_visible()
-      ):
-        print("Modal de sessão ativa detectado. Clicando em Confirmar...")
-        await modal_confirmar.click(force=True)
+          await btn_pro_els.nth(i).click(force=True)
+          await asyncio.sleep(2)
 
-      page_pro = await page_promise
-    except Exception as e:
-      print(f"Aviso clique CA Pro: {e}")
+          # Verifica se o modal "Existe uma sessão ativa" apareceu
+          modal_confirmar = page.locator('button:has-text("Confirmar")').first
+          if (
+              await modal_confirmar.count() > 0
+              and await modal_confirmar.is_visible()
+          ):
+            print("Modal de sessão ativa detectado. Clicando em Confirmar...")
+            await modal_confirmar.click(force=True)
+
+          page_pro = await page_promise
+          break
+        except Exception as e:
+          print(f"Tentativa de clique {i} falhou: {e}")
+          pass
 
     if not page_pro:
       await page.screenshot(
           path=f"erro_ca_pro_{nome_cliente.replace(' ', '_')}.png",
           full_page=True,
       )
-      raise Exception("Não abriu a aba do CA Pro!")
+      raise Exception(
+          "Não abriu a aba do CA Pro após tentar os botões visíveis!"
+      )
 
-    await page_pro.wait_for_load_state("domcontentloaded")
+    await page_pro.wait_for_load_state("networkidle")
     print(f"Acessou CA Pro de {nome_cliente}.")
 
   except Exception as e:
     print(f"Erro ao selecionar cliente {nome_cliente}: {e}")
     try:
-      await page.screenshot(path=f"erro_{nome_cliente.replace(' ', '_')}.png")
-    except Exception:
+      screenshot_path = f"erro_{nome_cliente.replace(' ', '_')}.png"
+      await page.screenshot(path=screenshot_path)
+      print(f"Screenshot de erro salvo em: {screenshot_path}")
+    except:
       pass
     return
 
   download_path = None
-
+  # Navegando pelo menu Vendas -> NF-e (seu seletor original que funciona)
   try:
-    print("Aguardando carregamento da interface do CA Pro...")
-    await page_pro.wait_for_load_state("domcontentloaded")
-    await asyncio.sleep(3)
+    vendas_els = page_pro.locator('//*[@id="PRODUCTS"]/div[1]/div')
+    for i in range(await vendas_els.count()):
+      if await vendas_els.nth(i).is_visible():
+        await vendas_els.nth(i).click(force=True)
+        break
+    await asyncio.sleep(1)
 
-    # 1. Navegação explícita e obrigatória: Vendas -> Notas fiscais de produto
-    print("Aguardando menu Vendas...")
-    seletor_menu_vendas = (
-        '#PRODUCTS, [id*="PRODUCTS"], nav a:has-text("Vendas"),'
-        ' a:has-text("Vendas"), button:has-text("Vendas")'
-    )
-    menu_vendas = page_pro.locator(seletor_menu_vendas).first
-    await menu_vendas.wait_for(state="visible", timeout=25000)
-    await menu_vendas.click(force=True)
-    await asyncio.sleep(1.5)
+    nfe_els = page_pro.locator('//*[@id="SALES_CONTROL_PRODUCT_INVOICE"]')
+    for i in range(await nfe_els.count()):
+      if await nfe_els.nth(i).is_visible():
+        await nfe_els.nth(i).click(force=True)
+        break
+    await page_pro.wait_for_load_state("networkidle")
+    await asyncio.sleep(3)  # Aguardar a lista renderizar inicialmente
 
-    print("Clicando em Notas fiscais de produto...")
-    seletor_menu_nfe = (
-        '#SALES_CONTROL_PRODUCT_INVOICE, a:has-text("Notas fiscais de'
-        ' produto"), :has-text("Notas fiscais de produto"), a[href*="nota"]'
-    )
-    menu_nfe = page_pro.locator(seletor_menu_nfe).first
-    await menu_nfe.wait_for(state="visible", timeout=20000)
-    await menu_nfe.click(force=True)
-    print("Acessou a tela de Notas Fiscais de Produto com sucesso!")
+    # Verifica se existem notas fiscais na tela
+    vazio = False
+    try:
+      await page_pro.wait_for_selector(
+          'text="Nenhum resultado encontrado"', timeout=15000
+      )
+      vazio = True
+    except:
+      vazio = False
 
-    await page_pro.wait_for_load_state("domcontentloaded")
-    await asyncio.sleep(4)
+    if vazio:
+      print("Nenhuma nota fiscal encontrada no período inicial.")
 
-    # 2. Configuração do filtro para 'Este mês'
-    print("Configurando filtro para 'Este mês'...")
+    # Configurar filtro "Este mês"
+    print("Tentando configurar filtro para 'Este mês'...")
     try:
       meses = [
           "Janeiro",
@@ -213,7 +171,6 @@ async def processar_cliente(context, page, cliente_info, sheet):
           "Hoje",
           "Este ano",
           "Últimos 7 dias",
-          "Período",
       ]:
         btn = page_pro.locator(f'button:has-text("{texto}")').first
         if await btn.count() > 0 and await btn.is_visible():
@@ -221,95 +178,133 @@ async def processar_cliente(context, page, cliente_info, sheet):
           clicou_dropdown = True
           break
 
+      if not clicou_dropdown:
+        lbl_periodo = page_pro.locator('text="Período"').first
+        if await lbl_periodo.count() > 0:
+          pass
+
       if clicou_dropdown:
         await asyncio.sleep(1.5)
-        btn_este_mes = page_pro.locator(
-            ':has-text("Este mês"), :has-text("Este Mês")'
-        ).first
+        btn_este_mes = page_pro.locator('text="Este mês"').nth(0)
         if await btn_este_mes.count() > 0 and await btn_este_mes.is_visible():
           await btn_este_mes.click()
-          print("Filtro alterado para 'Este mês' com sucesso!")
+          print("Filtro alterado para 'Este mês' com sucesso via Playwright!")
+        else:
+          btn_este_mes_alt = page_pro.locator('text="Este Mês"').nth(0)
+          if (
+              await btn_este_mes_alt.count() > 0
+              and await btn_este_mes_alt.is_visible()
+          ):
+            await btn_este_mes_alt.click()
+            print("Filtro alterado para 'Este Mês' com sucesso!")
 
-      await page_pro.wait_for_load_state("domcontentloaded")
-      await asyncio.sleep(3)
+        await page_pro.wait_for_load_state("networkidle")
+        await asyncio.sleep(2)
+
+        try:
+          lupa2 = (
+              page_pro.locator('input[placeholder*="Pesquisar"]')
+              .locator("xpath=..")
+              .locator("button")
+              .first
+          )
+          if await lupa2.count() > 0 and await lupa2.is_visible():
+            await lupa2.click()
+            print("Clicou na lupa para forçar a busca.")
+            await page_pro.wait_for_load_state("networkidle")
+            await asyncio.sleep(3)
+        except Exception as e:
+          print(f"Não achou a lupa, mas o filtro já deve ter aplicado: {e}")
+
     except Exception as e:
-      print(f"Aviso no filtro de data: {e}")
+      print(f"Não conseguiu alterar o filtro de data: {e}")
 
-    # 3. Marcar checkbox do cabeçalho da tabela (selecionar todas as notas)
-    print("Selecionando todas as notas da tabela...")
-    chk_todos = page_pro.locator(
-        'th input[type="checkbox"], thead input[type="checkbox"]'
-    ).first
-    if await chk_todos.count() > 0:
-      if not await chk_todos.is_checked():
-        await chk_todos.click(force=True)
-      print("Checkbox do cabeçalho marcado com sucesso!")
-      await asyncio.sleep(1.5)
+    # Re-verifica se ficou vazio após o filtro
+    try:
+      await page_pro.wait_for_selector(
+          'text="Nenhum resultado encontrado"', timeout=5000
+      )
+      vazio = True
+    except:
+      vazio = False
+
+    if vazio:
+      print("Nenhuma nota fiscal encontrada no mês atual. O total será 0.")
     else:
-      btn_sel = page_pro.locator('button:has-text("Selecionar todas")').first
-      if await btn_sel.count() > 0 and await btn_sel.is_visible():
-        await btn_sel.click(force=True)
-        print("Botão 'Selecionar todas' clicado!")
-        await asyncio.sleep(1.5)
+      print("Abrindo menu de exportação (busca robusta)...")
 
-    # 4. Clicar no botão 'Ações' do cabeçalho (fora das linhas individuais)
-    print("Abrindo menu de exportação do cabeçalho...")
-    btn_header = (
-        page_pro.locator(
-            'button:has-text("Ações em lote"), button:has-text("Ações"),'
-            ' button:has-text("Exportar"), [aria-label*="Ações"]'
+      export_clicked = False
+      for selector in [
+          (
+              'div[title="Ações"]'
+              " .ds-split-button-wrapper-group__trigger button"
+          ),
+          'button:has-text("Exportar")',
+          '[aria-label="Exportar"]',
+          '[aria-label="Opções de exportação"]',
+      ]:
+        try:
+          btn = page_pro.locator(selector).first
+          if await btn.count() > 0 and await btn.is_visible():
+            await btn.click(force=True)
+            await asyncio.sleep(2)
+            exportar_opt = page_pro.locator('text="Exportar planilha"').first
+            if (
+                await exportar_opt.count() > 0
+                and await exportar_opt.is_visible()
+            ):
+              export_clicked = True
+              break
+        except:
+          pass
+
+      if not export_clicked:
+        print(
+            "Aviso: Não consegui confirmar a abertura do menu de exportação."
         )
-        .filter(has_not=page_pro.locator("tbody tr *"))
-        .first
-    )
 
-    if await btn_header.count() > 0:
-      await btn_header.click(force=True)
-      await asyncio.sleep(1.5)
-
-    # 5. Clicar em 'Exportar planilha'
-    print("Clicando em Exportar planilha...")
-    opcao_exportar = page_pro.locator(
-        ':has-text("Exportar planilha"), [role="menuitem"]:has-text("Exportar"),'
-        ' a:has-text("Exportar"), li:has-text("Exportar"),'
-        ' span:has-text("Exportar"), button:has-text("Exportar")'
-    ).last
-
-    await opcao_exportar.wait_for(state="visible", timeout=20000)
-
-    async with page_pro.expect_download(timeout=45000) as download_info:
-      try:
-        await opcao_exportar.click(timeout=5000)
-      except Exception:
-        await opcao_exportar.evaluate("el => el.click()")
-
-    download = await download_info.value
-    download_path = await download.path()
-    print(f"Planilha de NF-e baixada em: {download_path}")
+      print("Clicando em Exportar planilha...")
+      async with page_pro.expect_download() as download_info:
+        btn_export = page_pro.locator('text="Exportar planilha"').first
+        await btn_export.evaluate("el => el.click()")
+      download = await download_info.value
+      download_path = await download.path()
+      print(f"Planilha baixada em: {download_path}")
 
   except Exception as e:
-    print(f"Erro na navegação ({nome_cliente}): {e}")
+    print(f"Erro durante a navegação na Conta Azul ({nome_cliente}): {e}")
     try:
-      await page_pro.screenshot(path=f"erro_{nome_cliente.replace(' ', '_')}.png")
-    except Exception:
+      screenshot_path = f"erro_{nome_cliente.replace(' ', '_')}.png"
+      await page_pro.screenshot(path=screenshot_path)
+      print(f"Screenshot de erro salvo em: {screenshot_path}")
+    except:
       pass
     await page_pro.close()
     return
 
   await page_pro.close()
 
-  # Processamento e Cálculo dos Valores
-  total_calculado = 0.0
   if download_path:
-    print("Processando dados do arquivo baixado...")
-    df = carregar_planilha(download_path)
+    print("Processando dados da planilha baixada...")
+    # Suporte a Excel (.xlsx) e CSV
+    df = None
+    try:
+      with open(download_path, "rb") as f:
+        cabecalho = f.read(4)
+      if cabecalho.startswith(b"PK\x03\x04") or download_path.endswith(".xlsx"):
+        df = pd.read_excel(download_path)
+      else:
+        df = pd.read_csv(download_path, sep=";", encoding="utf-8")
+    except Exception:
+      try:
+        df = pd.read_csv(download_path, sep=";", encoding="latin1")
+      except Exception:
+        df = pd.read_excel(download_path)
 
-    print(f"Total de linhas na planilha: {len(df)}")
-    print(f"Colunas encontradas: {list(df.columns)}")
+    # Identificar coluna CFOP
+    col_cfop = next((c for c in df.columns if "CFOP" in str(c).upper()), "CFOP")
 
-    col_cfop = next(
-        (c for c in df.columns if "CFOP" in str(c).upper()), "CFOP"
-    )
+    # Identificar coluna de número da nota
     col_numero = next(
         (
             c
@@ -321,7 +316,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
         "Número da NFe",
     )
 
-    # Identificar a coluna real do Valor Total da Nota Fiscal (ignorando parcelas)
+    # Identificar coluna de valor total (priorizando a nota e ignorando parcelas)
     col_total = None
     for c in df.columns:
       c_up = str(c).upper()
@@ -331,59 +326,34 @@ async def processar_cliente(context, page, cliente_info, sheet):
     if not col_total:
       for c in df.columns:
         c_up = str(c).upper()
-        if "VALOR TOTAL" in c_up and "PRODUTO" in c_up:
+        if "TOTAL" in c_up and not any(
+            b in c_up for b in ["PARCELA", "ICMS", "IPI", "PIS", "COFINS"]
+        ):
           col_total = c
           break
     if not col_total:
-      for c in df.columns:
-        c_up = str(c).upper()
-        if ("TOTAL" in c_up or "VALOR" in c_up) and (
-            "NOTA" in c_up or "NF" in c_up
-        ):
-          if not any(
-              bad in c_up for bad in ["PARCELA", "ICMS", "IPI", "PIS", "COFINS"]
-          ):
-            col_total = c
-            break
-    if not col_total:
-      col_total = next(
-          (
-              c
-              for c in df.columns
-              if "TOTAL" in str(c).upper() and "PARCELA" not in str(c).upper()
-          ),
-          df.columns[-1],
-      )
+      col_total = "Total NF-e"
 
     print(
-        f"Colunas selecionadas: CFOP='{col_cfop}', Número='{col_numero}',"
-        f" ValorTotal='{col_total}'"
+        f"Colunas utilizadas: CFOP='{col_cfop}', Número='{col_numero}',"
+        f" Total='{col_total}'"
     )
 
+    # Definir CFOPs aceitos por cliente (com ou sem ponto: 5101 e 5.101)
     if "Fibrart" in nome_cliente:
-      cfops_alvo = ["5101", "6101"]
+      cfops_base = ["5101", "6101"]
     elif "Afonso" in nome_cliente:
-      cfops_alvo = ["5102", "6102"]
+      cfops_base = ["5102", "6102"]
     else:
-      cfops_alvo = ["5101"]
+      cfops_base = ["5101"]
+
+    cfops_expandidos = cfops_base + [c[0] + "." + c[1:] for c in cfops_base]
+    padrao_regex = "|".join(cfops_expandidos)
 
     if col_cfop in df.columns:
-      # Extrai os primeiros 4 dígitos (atende 5.101 e 5101)
-      cfop_extraido = (
-          df[col_cfop]
-          .astype(str)
-          .str.replace(".", "", regex=False)
-          .str.extract(r"(\d{4})")[0]
-      )
-      print(
-          f"CFOPs encontrados na planilha: {cfop_extraido.dropna().unique().tolist()}"
-      )
-
-      df_filtrado = df[cfop_extraido.isin(cfops_alvo)]
-      print(
-          f"Notas que atendem aos CFOPs {cfops_alvo}: {len(df_filtrado)} de"
-          f" {len(df)}"
-      )
+      df_filtrado = df[
+          df[col_cfop].astype(str).str.contains(padrao_regex, na=False)
+      ]
     else:
       df_filtrado = df
 
@@ -392,13 +362,34 @@ async def processar_cliente(context, page, cliente_info, sheet):
     else:
       df_unique_nfe = df_filtrado
 
-    if not df_unique_nfe.empty and col_total and col_total in df_unique_nfe.columns:
+    def parse_money(valor_str):
+      if pd.isna(valor_str):
+        return 0.0
+      if isinstance(valor_str, (int, float)):
+        return float(valor_str)
+      valor = (
+          str(valor_str)
+          .replace("R$", "")
+          .replace(".", "")
+          .replace(",", ".")
+          .strip()
+      )
+      try:
+        return float(valor)
+      except ValueError:
+        return 0.0
+
+    if df_unique_nfe.empty or col_total not in df_unique_nfe.columns:
+      total_calculado = 0.0
+    else:
       df_unique_nfe["Total NF-e Num"] = df_unique_nfe[col_total].apply(
           parse_money
       )
       total_calculado = df_unique_nfe["Total NF-e Num"].sum()
       if isinstance(total_calculado, str):
         total_calculado = 0.0
+  else:
+    total_calculado = 0.0
 
   total_formatado = (
       f"{float(total_calculado):,.2f}"
@@ -406,7 +397,7 @@ async def processar_cliente(context, page, cliente_info, sheet):
       .replace(".", ",")
       .replace("X", ".")
   )
-  print(f"\n>>> TOTAL FINAL CALCULADO PARA {nome_cliente}: R$ {total_formatado}")
+  print(f"Total Calculado para {nome_cliente}: R$ {total_formatado}")
 
   print(f"Atualizando Google Sheets (Célula {celula_alvo})...")
   try:
@@ -433,7 +424,7 @@ async def main():
     browser = await p.chromium.launch(headless=True)
     context = await browser.new_context(
         accept_downloads=True,
-        viewport={"width": 1920, "height": 1080},
+        viewport={"width": 1041, "height": 947},
         locale="pt-BR",
         timezone_id="America/Sao_Paulo",
     )
@@ -441,43 +432,29 @@ async def main():
 
     print("Acessando Conta Azul...")
     await page.goto("https://mais.contaazul.com/#/login")
-    await page.wait_for_load_state("domcontentloaded")
 
     await page.fill('input[type="email"]', CONTA_AZUL_EMAIL)
     await page.fill('input[type="password"]', CONTA_AZUL_PASSWORD)
     await page.click('text="Entrar"')
-    await page.wait_for_load_state("domcontentloaded")
+    await page.wait_for_load_state("networkidle")
     await asyncio.sleep(2)
 
-    # 2FA
+    # --- Lógica de 2FA com PyOTP resiliente ---
     if CONTA_AZUL_TOTP_SECRET:
       try:
         print("Verificando se o 2FA foi solicitado...")
-        await asyncio.sleep(2)
-        seletor_inputs = (
-            'input:visible:not([type="checkbox"]):not([type="radio"])'
-        )
-
         try:
-          await page.wait_for_selector(seletor_inputs, timeout=6000)
-        except Exception:
+          await page.wait_for_selector(
+              'text="aplicativo de autenticação"', timeout=5000
+          )
+        except:
           pass
 
-        inputs_2fa = page.locator(seletor_inputs)
-        qtd_inputs = await inputs_2fa.count()
+        input_2fa_locator = page.locator(
+            'input:visible:not([type="checkbox"])'
+        ).first
 
-        is_2fa = False
-        if qtd_inputs > 0 and ("login" in page.url or "auth" in page.url):
-          primeiro_tipo = (
-              await inputs_2fa.first.get_attribute("type") or ""
-          ).lower()
-          primeiro_nome = (
-              await inputs_2fa.first.get_attribute("name") or ""
-          ).lower()
-          if primeiro_tipo != "email" and "email" not in primeiro_nome:
-            is_2fa = True
-
-        if is_2fa:
+        if await input_2fa_locator.count() > 0:
           print("Tela de 2FA detectada. Gerando código...")
           import pyotp
 
@@ -485,50 +462,42 @@ async def main():
           if tempo_restante < 5:
             await asyncio.sleep(tempo_restante + 1)
 
-          secret_limpo = (
-              CONTA_AZUL_TOTP_SECRET.replace(" ", "").strip().upper()
-          )
-          totp = pyotp.TOTP(secret_limpo)
+          totp = pyotp.TOTP(CONTA_AZUL_TOTP_SECRET.strip())
           codigo_2fa = totp.now()
           print(f"Código gerado: {codigo_2fa}")
 
-          if qtd_inputs >= 6:
-            for i, digito in enumerate(codigo_2fa):
-              await inputs_2fa.nth(i).fill(digito)
-              await asyncio.sleep(0.05)
-          else:
-            await inputs_2fa.first.click()
-            await page.keyboard.type(codigo_2fa, delay=100)
-
-          await page.keyboard.press("Enter")
+          await input_2fa_locator.fill(codigo_2fa)
           await asyncio.sleep(1)
 
           btn_auth = page.locator(
               'button:has-text("Autenticar"):visible,'
               ' button:has-text("Confirmar"):visible,'
-              ' button:has-text("Verificar"):visible,'
-              ' button:has-text("Entrar"):visible'
+              ' button:has-text("Verificar"):visible'
           ).first
-          if await btn_auth.count() > 0 and await btn_auth.is_visible():
-            try:
-              await btn_auth.click(timeout=3000)
-            except Exception:
-              pass
+          if await btn_auth.count() > 0:
+            await btn_auth.click()
 
-          # Aguarda sair da tela de login
+          # Espera a transição de saída do login sem falso alarme
           for _ in range(12):
             await asyncio.sleep(1)
-            if "login" not in page.url and "auth" not in page.url:
+            if "login" not in page.url and not await btn_auth.is_visible():
               break
 
           print("2FA preenchido com sucesso!")
-
+      except ImportError:
+        print("ERRO FATAL: Biblioteca pyotp não instalada!")
       except Exception as e:
-        print(f"Aviso no fluxo de 2FA: {e}")
+        print(f"Erro no fluxo do 2FA: {e}")
+    else:
+      print(
+          "Aviso: CONTA_AZUL_TOTP_SECRET não configurado. Se pedir 2FA, vai"
+          " falhar."
+      )
 
-    await page.wait_for_load_state("domcontentloaded")
+    await page.wait_for_load_state("networkidle")
     await asyncio.sleep(3)
 
+    # Processar cada cliente da lista
     for cliente in CLIENTES_ALVO:
       await processar_cliente(context, page, cliente, sheet)
 
